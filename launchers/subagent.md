@@ -8,4 +8,6 @@ The host agent's built-in subagents (Claude Code's `Agent` tool with a `model` o
 
 The four verbs are the host tool's own: starting the subagent is **start**, its final report is **read** and **wait** in one, and **send** exists only if the host lets you message a running subagent. The subagent does not see your conversation, so the task description must stand alone.
 
-Good fits: repository exploration, quick lookups mid-conversation, mechanical sweeps small enough not to need another product. For review it is a last resort — a fresh context but the same family — so when you use it that way, say so in your report.
+Which roles may use subagents is the roster's decision (its **Launchers** section). If the roster allows them for one row only, use them for that row only; nothing below widens that.
+
+Good fits, where the roster allows: repository exploration, quick lookups mid-conversation, mechanical sweeps small enough not to need another product. For review it is a last resort — a fresh context but the same family — so when you use it that way, say so in your report.

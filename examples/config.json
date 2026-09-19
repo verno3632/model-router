@@ -1,5 +1,4 @@
 {
-  "launchers": ["orca", "shell", "tmux", "subagent"],
   "products": {
     "swe":    {"models": [], "free_until": "2026-10-10"},
     "claude": {"models": ["haiku", "sonnet", "opus", "fable"]},

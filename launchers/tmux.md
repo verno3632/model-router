@@ -4,16 +4,17 @@ Each child is a detached tmux session; the session name is the handle. Carries b
 
 | Verb | Command |
 |---|---|
-| start | `tmux new-session -d -s mr-<task> -c <worktree> '<command>'` then `tmux set-option -t mr-<task> remain-on-exit on` |
+| start | `tmux new-session -d -s mr-<task> -c <worktree> "sh -c '<command>; echo \$? > <worktree>/.mr-<task>.exit'"` |
 | read | `tmux capture-pane -p -t mr-<task> -S -200` |
-| wait | poll `tmux display-message -p -t mr-<task> '#{pane_dead} #{pane_dead_status}'` until it starts with `1`; the second field is the exit code |
+| wait | `until [ -f <worktree>/.mr-<task>.exit ]; do sleep 5; done; cat <worktree>/.mr-<task>.exit` → exit code |
 | send | `tmux send-keys -t mr-<task> -l '<text>'` then `tmux send-keys -t mr-<task> Enter` |
 
-- `remain-on-exit` keeps the pane after the child exits, so the last output and the exit code stay readable. Clean up with `tmux kill-session -t mr-<task>` once you have them.
+- The session disappears when the child exits, taking its screen with it. The exit code therefore goes to a file, and a headless child's report to `run --log`. A child that dies at once — `run` refusing a dead tier with 75 — is caught the same way. Delete the `.exit` file afterwards; a TUI child's session is closed with `tmux kill-session -t mr-<task>`.
+- `<command>` sits inside two layers of quotes. Keep prompts out of it: put the task in a file and pass it by `--prompt-file` or stdin (see `shell.md`).
 - `send-keys -l` sends the text literally; without it tmux interprets words like `Enter` or `C-c` inside your text as keys. Send `Enter` as a separate call.
 - The user can watch or take over with `tmux attach -t mr-<task>`. Say so when you start a long-running child.
 
 ## Children
 
-- Headless: `<command>` is `python3 $L run <key> -- <product CLI> ...` (command examples in `shell.md`; add `--log <file>` if you will kill the session before reading). Exit code 75 in `pane_dead_status` means limited: move to the next key.
+- Headless: `<command>` is `python3 $L run --log <file> <key> -- <product CLI> ...` (command examples in `shell.md`). `--log` goes before the key. Read the report from `<file>`. Exit code 75 means unavailable: move to the next key.
 - TUI: pick the tier with `python3 $L first ...`, start the CLI with explicit model and effort arguments, **read** until its input box is on screen, then **send** the task. When it looks stuck: `tmux capture-pane -p -t mr-<task> -S -200 | python3 $L scan <key>`.

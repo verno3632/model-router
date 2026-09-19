@@ -29,6 +29,7 @@ MAX_MS = 7 * 86_400_000  # allow recording up to weekly limits
 UNITS = {"m": 60_000, "h": 3_600_000, "d": 86_400_000}
 NAME_RE = re.compile(r"[a-z0-9_-]+")
 MODEL_RE = re.compile(r"[a-z0-9_.-]+")
+ROSTER_COPY_NOTE = "<!-- model-router: unedited copy of the author's roster. Rewrite it for your subscriptions, then delete this line. -->\n"
 
 
 def skill_dir():
@@ -106,21 +107,30 @@ def load_config():
     return {"products": out, "launchers": launchers, "path": path}
 
 
-def norm_key(key, cfg):
-    """Canonical '<product>' or '<product>:<model>'. Bare models resolve only when
-    exactly one product lists them."""
+def resolve_key(key, cfg):
+    """Canonical '<product>' or '<product>:<model>', or None when the key is unknown,
+    ambiguous, or malformed. Keys are case-insensitive. Bare models resolve only
+    when exactly one product lists them."""
+    key = key.lower()
     products = cfg["products"]
     if ":" in key:
         product, model = key.split(":", 1)
-        if product not in products:
-            fail(unknown_msg(key, cfg))
+        if product not in products or not MODEL_RE.fullmatch(model):
+            return None
         return key
     if key in products:
         return key
     owners = [p for p, spec in products.items() if key in spec["models"]]
-    if len(owners) == 1:
-        return f"{owners[0]}:{key}"
-    fail(unknown_msg(key, cfg))
+    return f"{owners[0]}:{key}" if len(owners) == 1 else None
+
+
+def norm_key(key, cfg):
+    """resolve_key or exit 2."""
+    key = key.lower()
+    out = resolve_key(key, cfg)
+    if out is None:
+        fail(unknown_msg(key, cfg))
+    return out
 
 
 def unknown_msg(key, cfg):
@@ -179,11 +189,21 @@ def product_of(key, cfg):
 
 
 def dead_until(key, cool, cfg):
-    """Deadline if the key itself or its whole product is cooling. None if alive."""
+    """Deadline if the key is cooling. A bare product is dead when it has its own
+    record or every listed model is cooling — the expiry is the earliest model's.
+    None if alive."""
     if expired(key, cfg):
         return float("inf")
-    hits = [cool[k] for k in (key, product_of(key, cfg)) if k in cool]
-    return max(hits) if hits else None
+    product = product_of(key, cfg)
+    if ":" in key:
+        hits = [cool[k] for k in (key, product) if k in cool]
+        return max(hits) if hits else None
+    if product in cool:
+        return cool[product]
+    models = [f"{product}:{m}" for m in cfg["products"].get(product, {}).get("models", [])]
+    if models and all(m in cool for m in models):
+        return min(cool[m] for m in models)
+    return None
 
 
 # ---------- limit detection ----------
@@ -256,7 +276,10 @@ def cmd_status(_):
 
 
 def cmd_mark(args):
-    key = norm_key(args.key, load_config())
+    cfg = load_config()
+    key = norm_key(args.key, cfg)
+    if ":" in key and key.split(":", 1)[1] not in cfg["products"][product_of(key, cfg)]["models"]:
+        print(f"limits: {key} is not in config; recording anyway", file=sys.stderr)
     ms = parse_duration(args.duration)
     if ms is None:
         fail(f"bad duration: {args.duration} (30m / 5h / 3d)")
@@ -279,17 +302,27 @@ def cmd_first(args):
     cfg = load_config()
     cool = cooling()
     for arg in args.keys:
-        key = norm_key(arg, cfg)
+        key = resolve_key(arg, cfg)
+        if key is None:
+            print(f"limits: skipping unknown key: {arg}", file=sys.stderr)
+            continue
         if dead_until(key, cool, cfg) is None:
             print(key)
             return 0
-    print("limits: every listed key is limited", file=sys.stderr)
+    print("limits: no live key in the chain", file=sys.stderr)
     return 1
 
 
 def cmd_scan(args):
     key = norm_key(args.key, load_config())
-    text = open(args.file, encoding="utf-8", errors="replace").read() if args.file else sys.stdin.read()
+    if args.file:
+        try:
+            with open(args.file, encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+        except OSError as err:
+            fail(f"cannot read {args.file}: {err.strerror or err}")
+    else:
+        text = sys.stdin.read()
     return EXIT_LIMITED if mark_if_limited(key, text.splitlines()) else 0
 
 
@@ -305,6 +338,8 @@ def cmd_run(args):
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not command:
         fail("no command to run (limits.py run <key> -- <command...>)")
+    if command[0].startswith("-"):
+        fail("options such as --log go before the key: limits.py run [--log F] <key> -- <command...>")
     until = dead_until(key, cooling(), cfg)
     if until is not None:
         when = "free tier ended" if until == float("inf") else f"until {until_text(until)}"
@@ -313,7 +348,13 @@ def cmd_run(args):
     tail = collections.deque(maxlen=TAIL_LINES)
     # Some launchers drop a terminal's output once the child exits; --log keeps the report.
     log = open(args.log, "w", encoding="utf-8") if args.log else None
-    proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
+    try:
+        proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
+    except (FileNotFoundError, PermissionError):
+        if log:
+            log.close()
+        print(f"limits: cannot start {command[0]}: not installed or not executable; treat this tier as unavailable", file=sys.stderr)
+        return EXIT_LIMITED
 
     def pump(src, dst):
         for line in src:
@@ -337,14 +378,23 @@ def cmd_run(args):
 
 def cmd_where(_):
     cfg = load_config()
-    rows = [
-        ("home", home_dir()),
-        ("config", cfg["path"]),
-        ("roster", os.path.join(home_dir(), "roster.md")
-         if os.path.exists(os.path.join(home_dir(), "roster.md"))
-         else os.path.join(skill_dir(), "examples", "roster.md")),
-    ]
-    rows += [("launcher", os.path.join(skill_dir(), "launchers", f"{name}.md")) for name in cfg["launchers"]]
+    roster = os.path.join(home_dir(), "roster.md")
+    if not os.path.exists(roster):
+        roster = os.path.join(skill_dir(), "examples", "roster.md")
+    rows = [("home", home_dir()), ("config", cfg["path"]), ("roster", roster)]
+    for name in cfg["launchers"]:
+        path = os.path.join(skill_dir(), "launchers", f"{name}.md")
+        if os.path.exists(path):
+            rows.append(("launcher", path))
+        else:
+            print(f'limits: no doc for launcher "{name}"; skipping', file=sys.stderr)
+    try:
+        with open(roster, encoding="utf-8") as fh:
+            head = fh.read(200)
+    except OSError:
+        head = ""
+    if head.startswith("<!-- model-router: unedited copy"):
+        print("limits: roster is still an unedited copy of the example; ask the user to rewrite it", file=sys.stderr)
     for name, path in rows:
         print(f"{name}\t{path}")
     return 0
@@ -362,7 +412,13 @@ def cmd_init(_):
         elif os.path.exists(dst):
             print(f"skipped {dst}: already exists")
         else:
-            shutil.copyfile(src, dst)
+            if name == "roster.md":
+                with open(src, encoding="utf-8") as fh:
+                    body = fh.read()
+                with open(dst, "w", encoding="utf-8") as fh:
+                    fh.write(ROSTER_COPY_NOTE + body)
+            else:
+                shutil.copyfile(src, dst)
             print(f"copied {src} -> {dst}")
     print(f"edit {os.path.join(home_dir(), 'config.json')} and roster.md for your setup")
     return 0
@@ -384,9 +440,14 @@ def fetch_json(url, headers):
 
 
 def iso_to_epoch(text):
-    from datetime import datetime
+    from datetime import datetime, timezone
 
-    return datetime.fromisoformat(text).timestamp() if text else None
+    if not text:
+        return None
+    dt = datetime.fromisoformat(text.replace("Z", "+00:00"))  # 3.9/3.10 can't parse 'Z'
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
 
 
 def claude_token():
@@ -487,6 +548,16 @@ def grade(window):
     return ("surplus" if room >= SURPLUS_AT else "normal"), text
 
 
+def limit_deadline(week, reached, now=None):
+    """Epoch seconds a limited product cools until. A spent week (used >= 100) cools
+    until the weekly reset; a bare limit_reached cools for 5 hours. None = not limited."""
+    if (week.get("used") or 0) >= 100:
+        return week.get("resets")
+    if reached:
+        return (time.time() if now is None else now) + 5 * 3600
+    return None
+
+
 def auto_mark(key, until_epoch):
     """Copy a limit the API reports into the records. 5h if no deadline is readable."""
     state = load()
@@ -501,6 +572,7 @@ def cmd_budget(args):
     data = load_budget(args.refresh, cfg)
     for product in cfg["products"]:
         if product not in data:
+            print(f"{product:<7} normal   not graded (no usage source)")
             continue
         info = data[product] or {}
         if "error" in info:
@@ -508,8 +580,9 @@ def cmd_budget(args):
             continue
         state, text = grade(info.get("week"))
         week = info.get("week") or {}
-        if (week.get("used") or 0) >= 100 or info.get("reached"):
-            auto_mark(product, week.get("resets"))
+        deadline = limit_deadline(week, info.get("reached"))
+        if deadline is not None:
+            auto_mark(product, deadline)
         if product == "claude":
             five = info.get("five_hour")
             if five is not None:

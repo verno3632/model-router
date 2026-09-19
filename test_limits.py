@@ -242,5 +242,193 @@ class TestWhereInit(Base):
             self.assertEqual(fh.read(), '{"products": {"mine": {}}}')
 
 
+class TestFirstSkipsUnknown(Base):
+    def test_unknown_key_skipped(self):
+        code, out, err = cli("first", "nope", "swe")
+        self.assertEqual(code, 0)
+        self.assertEqual(out.strip(), "swe")
+        self.assertIn("limits: skipping unknown key: nope", err)
+
+    def test_unknown_product_and_bare_skipped(self):
+        code, out, err = cli("first", "palm:big", "vega", "opus")
+        self.assertEqual(code, 0)
+        self.assertEqual(out.strip(), "claude:opus")
+        self.assertEqual(err.count("skipping unknown key"), 2)
+
+    def test_all_unknown_exits_1(self):
+        code, _, err = cli("first", "nope", "palm:big")
+        self.assertEqual(code, 1)
+
+    def test_strict_commands_still_exit_2(self):
+        for argv in (("mark", "nope"), ("clear", "nope"), ("scan", "nope"), ("run", "nope", "--", "true")):
+            code, _, _ = cli(*argv)
+            self.assertEqual(code, 2, argv)
+
+
+class TestBundledConfig(Base):
+    def test_no_launchers_key_uses_detection(self):
+        with open(os.path.join(limits.skill_dir(), "examples", "config.json")) as fh:
+            raw = json.load(fh)
+        self.assertNotIn("launchers", raw)
+        os.remove(os.path.join(self.home, "config.json"))
+        cfg = limits.load_config()
+        self.assertEqual(cfg["launchers"], limits.default_launchers())
+
+
+class TestRunSpawnFailure(Base):
+    def test_missing_command_exits_75(self):
+        code, _, err = cli("run", "swe", "--", "definitely-not-a-real-command-xyz")
+        self.assertEqual(code, 75)
+        self.assertIn("limits: cannot start definitely-not-a-real-command-xyz: not installed or not executable", err)
+        self.assertNotIn("Traceback", err)
+        self.assertNotIn("swe", limits.load())
+
+    def test_option_after_dashes_exits_2(self):
+        code, _, err = cli("run", "swe", "--", "--log", "x")
+        self.assertEqual(code, 2)
+        self.assertIn("limits: options such as --log go before the key: limits.py run [--log F] <key> -- <command...>", err)
+
+
+class TestIsoToEpoch(Base):
+    def test_trailing_z(self):
+        import calendar
+        self.assertEqual(limits.iso_to_epoch("2026-01-01T00:00:00Z"), calendar.timegm((2026, 1, 1, 0, 0, 0)))
+
+    def test_naive_is_utc(self):
+        self.assertEqual(limits.iso_to_epoch("2026-01-01T00:00:00"), limits.iso_to_epoch("2026-01-01T00:00:00Z"))
+
+    def test_empty(self):
+        self.assertIsNone(limits.iso_to_epoch(None))
+        self.assertIsNone(limits.iso_to_epoch(""))
+
+
+class TestProductDeadline(Base):
+    def test_dead_when_all_models_cooling(self):
+        cli("mark", "claude:haiku", "--for", "1h")
+        cli("mark", "claude:sonnet", "--for", "2h")
+        cli("mark", "claude:opus", "--for", "3h")
+        cli("mark", "claude:fable", "--for", "5h")
+        cfg = limits.load_config()
+        cool = limits.cooling()
+        self.assertEqual(limits.dead_until("claude", cool, cfg), cool["claude:haiku"])
+
+    def test_alive_while_one_model_up(self):
+        cli("mark", "claude:haiku", "--for", "1h")
+        cfg = limits.load_config()
+        self.assertIsNone(limits.dead_until("claude", limits.cooling(), cfg))
+
+    def test_status_and_first_agree(self):
+        for m in ("haiku", "sonnet", "opus", "fable"):
+            cli("mark", f"claude:{m}", "--for", "1h")
+        code, out, _ = cli("status")
+        self.assertIn("DEAD claude", out)
+        code, out, _ = cli("first", "claude", "swe")
+        self.assertEqual(out.strip(), "swe")
+
+
+class TestKeyCaseAndShape(Base):
+    def test_uppercase_key(self):
+        code, out, _ = cli("mark", "OPUS", "--for", "1h")
+        self.assertEqual(code, 0)
+        self.assertIn("claude:opus", limits.load())
+
+    def test_uppercase_product_model(self):
+        self.assertEqual(limits.norm_key("Codex:Astra", limits.load_config()), "codex:astra")
+
+    def test_bad_model_name_exits_2(self):
+        code, _, _ = cli("mark", "claude:bad!!", "--for", "1h")
+        self.assertEqual(code, 2)
+
+    def test_unlisted_model_records_with_notice(self):
+        code, _, err = cli("mark", "codex:vega", "--for", "1h")
+        self.assertEqual(code, 0)
+        self.assertIn("limits: codex:vega is not in config; recording anyway", err)
+        self.assertIn("codex:vega", limits.load())
+
+
+class TestWhereLauncherDocs(Base):
+    def test_missing_doc_skipped(self):
+        write_config(self.home, dict(PRODUCTS), launchers=["shell", "nodoc"])
+        code, out, err = cli("where")
+        self.assertEqual(code, 0)
+        self.assertIn('limits: no doc for launcher "nodoc"; skipping', err)
+        launcher_rows = [l for l in out.splitlines() if l.startswith("launcher")]
+        self.assertEqual(len(launcher_rows), 1)
+        self.assertIn("shell.md", launcher_rows[0])
+
+
+class TestRosterCopyNote(Base):
+    def test_init_prepends_note_and_where_warns(self):
+        code, _, _ = cli("init")
+        self.assertEqual(code, 0)
+        roster = os.path.join(self.home, "roster.md")
+        with open(roster) as fh:
+            first = fh.readline()
+        self.assertEqual(
+            first,
+            "<!-- model-router: unedited copy of the author's roster. Rewrite it for your subscriptions, then delete this line. -->\n",
+        )
+        code, _, err = cli("where")
+        self.assertEqual(code, 0)
+        self.assertIn("limits: roster is still an unedited copy of the example; ask the user to rewrite it", err)
+
+    def test_where_quiet_after_rewrite(self):
+        cli("init")
+        with open(os.path.join(self.home, "roster.md"), "w") as fh:
+            fh.write("# Roster\nmine\n")
+        code, _, err = cli("where")
+        self.assertEqual(code, 0)
+        self.assertNotIn("unedited copy", err)
+
+
+class TestScanFileErrors(Base):
+    def test_missing_file(self):
+        code, _, err = cli("scan", "grok", "--file", os.path.join(self.home, "nope.txt"))
+        self.assertEqual(code, 2)
+        self.assertEqual(len(err.strip().splitlines()), 1)
+        self.assertNotIn("Traceback", err)
+
+    def test_unreadable_file(self):
+        code, _, err = cli("scan", "grok", "--file", self.home)  # a directory
+        self.assertEqual(code, 2)
+        self.assertNotIn("Traceback", err)
+
+
+class TestLimitDeadline(Base):
+    def test_spent_week_uses_reset(self):
+        self.assertEqual(limits.limit_deadline({"used": 100, "resets": 1234}, False, now=1), 1234)
+        self.assertEqual(limits.limit_deadline({"used": 100, "resets": 1234}, True, now=1), 1234)
+
+    def test_bare_reached_is_5h(self):
+        self.assertEqual(limits.limit_deadline({"used": 50}, True, now=1000), 1000 + 5 * 3600)
+
+    def test_not_limited(self):
+        self.assertIsNone(limits.limit_deadline({"used": 50}, False, now=1))
+        self.assertIsNone(limits.limit_deadline({}, False, now=1))
+
+    def test_budget_marks_5h_on_reached(self):
+        import time as _time
+        cache = {"at": _time.time(), "codex": {"week": {"used": 10, "resets": _time.time() + 86400, "span": 7 * 86400}, "reached": True}}
+        with open(limits.budget_cache(), "w") as fh:
+            json.dump(cache, fh)
+        code, _, _ = cli("budget")
+        self.assertEqual(code, 0)
+        until = limits.load()["codex"]
+        self.assertLess(until, (_time.time() + 6 * 3600) * 1000)
+        self.assertGreater(until, (_time.time() + 4 * 3600) * 1000)
+
+
+class TestBudgetNoFetcher(Base):
+    def test_products_without_fetcher_print_line(self):
+        import time as _time
+        with open(limits.budget_cache(), "w") as fh:
+            json.dump({"at": _time.time(), "claude": {"week": {"used": 1, "resets": _time.time() + 86400, "span": 7 * 86400}}}, fh)
+        code, out, _ = cli("budget")
+        self.assertEqual(code, 0)
+        self.assertIn("swe     normal   not graded (no usage source)", out)
+        self.assertIn("grok    normal   not graded (no usage source)", out)
+        self.assertIn("codex   normal   not graded (no usage source)", out)
+
+
 if __name__ == "__main__":
     unittest.main()

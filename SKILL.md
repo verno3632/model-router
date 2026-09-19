@@ -14,17 +14,17 @@ This file holds what is true for everyone. Who does what is in the **roster**; h
 `limits.py` sits next to this file. Set `L` to its path, then ask where everything is:
 
 ```sh
-L=<directory of this SKILL.md>/limits.py
+L=~/.agents/skills/model-router/limits.py    # wherever this SKILL.md is; limits.py is in the same directory
 python3 $L where
 # home      ~/.agents/model-router
 # config    .../config.json
 # roster    .../roster.md
-# launcher  .../launchers/orca.md      (one line per available launcher, in order of preference)
+# launcher  .../launchers/orca.md      (one line per launcher, in order of preference)
 ```
 
-1. Read the `roster` file. It is the only source of truth for models, effort levels, fallbacks and boundaries.
+1. Read the `roster` file. It is the only source of truth for models, effort levels, fallbacks and boundaries. This file refers to its sections by heading: **Keys**, **Priority**, **Launchers**, **Roles**, **Cheap-tier boundary**, **Budget**, **Formations**.
 2. Read a launcher doc when you are about to start a child — not before.
-3. If `roster` points into this skill's `examples/` directory, the user has not set up their own. Use it, and tell them once that `python3 $L init` copies editable versions into `home`.
+3. If `roster` points into this skill's `examples/` directory, the user has not set up their own: use it, and tell them once that `python3 $L init` copies editable versions into `home`. If `where` warns that the roster is an unedited copy, it still describes the skill author's subscriptions, not the user's: tell them once, and expect rows naming products they do not have — those fall through as unavailable.
 
 ## Principles
 
@@ -39,10 +39,10 @@ python3 $L where
 
 ## Choosing
 
-1. Find the row in the roster's role table that matches the work. Rows are in pipeline order.
-2. Check the roster's boundary lists: some work never goes to the cheap tier, even as a fallback.
-3. Before planning, reviewing or promoting, check the weekly budget (below) and apply the roster's budget table.
-4. Turn the row into keys — `<product>` or `<product>:<model>`, as the roster's key legend spells them — and let `limits.py first` pick the first live one (see "When a tier is dead").
+1. Find the row in the roster's **Roles** table that matches the work. Rows are in pipeline order.
+2. Check the roster's **Cheap-tier boundary**: some work never goes to the cheap tier, even as a fallback.
+3. Before planning, reviewing or promoting, check the weekly budget (below) and apply the roster's **Budget** table.
+4. Turn the row into keys — `<product>` or `<product>:<model>`, as the roster's **Keys** table spells them — and let `limits.py first` pick the first live one (see "When a tier is dead").
 
 ## Launching a child
 
@@ -62,14 +62,14 @@ Every launcher doc implements the same four verbs:
 | `shell` | yes | no | yes | `run` |
 | `subagent` | — | — | no, host product only | none; `mark` by hand |
 
-Use the first launcher `where` lists that can carry the child, unless the roster says otherwise. Children that edit files get their own git worktree so parallel children cannot collide.
+Use the first launcher `where` lists that can carry the child. The roster's **Launchers** section overrides this: it may restrict a launcher to certain roles or forbid it, and the launcher docs never widen what the roster allows. Children that edit files get their own git worktree so parallel children cannot collide.
 
 - A **headless** child (runs a prompt and exits) is always wrapped: `python3 $L run [--log <file>] <key> -- <command>`. Its final output is its report; `--log` keeps a copy where the launcher would lose it.
 - A **TUI** child holds the terminal, so it cannot be wrapped. Pick its tier with `first` before starting it; when it looks stuck, pipe **read** into `python3 $L scan <key>`.
 
 ## Weekly budget
 
-`python3 $L budget` grades each product's weekly quota by pace (share of the week elapsed − share used): **surplus**, **normal** or **tight**. When numbers cannot be fetched the grade is normal. Results are cached for 5 minutes and the decision is remade on every delegation, so an upgrade that burns quota undoes itself.
+`python3 $L budget` grades each product's weekly quota by pace (share of the week elapsed − share used): **surplus**, **normal** or **tight**. When numbers cannot be fetched, and for products with no usage source (shown as "not graded"), the grade is normal. Results are cached for 5 minutes and the decision is remade on every delegation, so an upgrade that burns quota undoes itself.
 
 The roster's budget table says what each grade changes. Surplus is spent on thinking roles; implementation and mass production stay on the cheap tier regardless. A model-specific line in the output is graded separately: treat that model by the worse of its own grade and its product's.
 
@@ -86,8 +86,10 @@ python3 $L mark codex:astra --for 5h               # record by hand (30m / 5h / 
 python3 $L clear codex:astra                       # it came back early
 ```
 
-- `run` and `scan` exit **75** when the tier is limited — whether it was already recorded or the child just hit it. **On 75, move to the next key.** Any other exit code is the child's own.
+- `run` and `scan` exit **75** when the tier is unavailable: already recorded as limited, limited just now, or its CLI is not installed. **On 75, move to the next key.** Any other exit code from `run` is the child's own.
+- `first` exits **1** with no output when every key in the chain is dead. Do not start the work; report to the user which tiers are dead and until when (`status`). It skips keys the config does not know, with a warning.
+- Exit **2** is a usage or configuration error — most often a roster key missing from `config.json`. Tell the user what to fix; do not guess another key.
 - Order of retreat: the same tool one step down (the roster's "demote" column), then the "fallback" column left to right, skipping dead keys.
 - A product key (`codex`) means the whole product is limited and kills all its models; a model key (`codex:astra`) kills only that model. `--for` takes the time until the reset shown in the error.
 - Records live in `home`, are shared by every session, and expire on their own. They are written only by `run`, `scan`, `mark` and `budget`, so do not start children any other way.
-- `run` and `scan` look at the last 30 lines only. If a report legitimately ends with the words "rate limit", the record is wrong: `clear` it.
+- `run` and `scan` look at the last 30 lines only. A hit is recorded until the reset time if the output states one, otherwise for 5 hours. If a report legitimately ends with the words "rate limit", the record is wrong: `clear` it.

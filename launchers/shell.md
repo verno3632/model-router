@@ -30,9 +30,9 @@ Review the diff there, merge, then `git worktree remove`.
 Examples only — the roster decides which products exist. Model and effort always go on the command line.
 
 ```sh
-claude -p '<task>' --model <model> --permission-mode acceptEdits
-codex exec -m <model> -c model_reasoning_effort=<effort> '<task>'
-devin --model <model> --permission-mode dangerous -p '<task>'
+claude -p --model <model> --permission-mode acceptEdits < brief.md
+codex exec -m <model> -c model_reasoning_effort=<effort> - < brief.md
+devin --model <model> --permission-mode dangerous --prompt-file brief.md -p
 ```
 
-A headless child cannot stop to ask for permission, so whatever it may do is granted at launch. Grant edit rights only inside a git worktree with a clean tree, and tell the user before the first such launch in a session. Long prompts go in a file (`--prompt-file`, or `"$(cat brief.md)"`), not inline.
+A headless child cannot stop to ask for permission, so whatever it may do is granted at launch. Grant edit rights only inside a git worktree with a clean tree, and tell the user before the first such launch in a session. Prompts go in a file, not inline: pass it by `--prompt-file` where the CLI has one, otherwise on stdin (`claude -p --model <model> ... < brief.md`). An inline prompt breaks on quotes, and a flag that takes several values (`--allowedTools a b c`) swallows a prompt placed after it — the child then fails at once with "no input". After **start**, **read** once to confirm the child is actually running.
