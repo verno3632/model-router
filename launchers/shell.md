@@ -23,16 +23,18 @@ A child that edits files gets its own checkout, so parallel children and your ow
 git -C <repo> worktree add ../<repo>-<task> -b <task>
 ```
 
-Review the diff there, merge, then `git worktree remove`.
+`<task>` is any short slug. Briefs, logs and `.exit` files go outside the repo (a temp directory), so they never show up in a diff. You, the director, read the diff. Merge and `git worktree remove` only when the user asked for the change to land; otherwise leave the branch and report its name.
 
 ## Headless commands
 
 Examples only — the roster decides which products exist. Model and effort always go on the command line.
 
 ```sh
-claude -p --model <model> --permission-mode acceptEdits < brief.md
+claude -p --model <model> --effort <effort> --permission-mode acceptEdits < brief.md
 codex exec -m <model> -c model_reasoning_effort=<effort> - < brief.md
 devin --model <model> --permission-mode dangerous --prompt-file brief.md -p
 ```
 
-A headless child cannot stop to ask for permission, so whatever it may do is granted at launch. Grant edit rights only inside a git worktree with a clean tree, and tell the user before the first such launch in a session. Prompts go in a file, not inline: pass it by `--prompt-file` where the CLI has one, otherwise on stdin (`claude -p --model <model> ... < brief.md`). An inline prompt breaks on quotes, and a flag that takes several values (`--allowedTools a b c`) swallows a prompt placed after it — the child then fails at once with "no input". After **start**, **read** once to confirm the child is actually running.
+`run` passes its stdin to the child, so the wrapped form is simply `python3 $L run <key> -- claude -p --model <model> ... < brief.md`. The roster's effort words (Low / Medium / High) are not the CLI's: check `--help` for the accepted values. A child that only reviews gets no edit rights (`claude --permission-mode plan`, `codex exec -s read-only`).
+
+A headless child cannot stop to ask for permission, so whatever it may do is granted at launch. Grant edit rights only inside a git worktree with a clean tree, and tell the user before the first such launch in a session — telling is enough; wait for an answer only if their own rules ask for one. Prompts go in a file, not inline: pass it by `--prompt-file` where the CLI has one, otherwise on stdin (`claude -p --model <model> ... < brief.md`). An inline prompt breaks on quotes, and a flag that takes several values (`--allowedTools a b c`) swallows a prompt placed after it — the child then fails at once with "no input". After **start**, **read** once to confirm the child is actually running.

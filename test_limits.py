@@ -181,6 +181,35 @@ class TestScan(Base):
         self.assertEqual(code, 0)
 
 
+class TestRealLimitWording(Base):
+    def test_codex_limit_detected(self):
+        lines = [
+            "■ You’ve hit your usage limit. Visit https://chatgpt.com/codex/settings/usage",
+            "to purchase more credits or try again at Sep 26th, 2026 5:13 PM.",
+            "Goal hit usage limits (/goal resume)",
+        ]
+        self.assertTrue(limits.mark_if_limited("grok", lines))
+        self.assertIn("grok", limits.load())
+
+    def test_wrapped_limit_detected(self):
+        lines = ["■ You’ve hit your", "usage limit. Try again later."]
+        self.assertTrue(limits.mark_if_limited("grok", lines))
+
+    def test_advisories_not_detected(self):
+        for line in (
+            "Approaching rate limits",
+            "Switch to gpt-5.6-luna for lower credit usage?",
+            "3. Keep current model (never show again) Hide future rate limit reminders about switching models.",
+            "⚠ Heads up, you have less than 5% of your weekly limit left. Run /status for a breakdown.",
+        ):
+            self.assertFalse(limits.mark_if_limited("grok", [line]), line)
+        self.assertEqual(limits.load(), {})
+
+    def test_advisory_plus_limit_is_limit(self):
+        lines = ["Approaching rate limits", "You've hit your usage limit. Try again in 3 hours"]
+        self.assertTrue(limits.mark_if_limited("grok", lines))
+
+
 class TestResetMs(Base):
     def test_hours_minutes(self):
         self.assertEqual(limits.reset_ms("try again in 3 hours 12 minutes"), 3 * 3600000 + 12 * 60000)
@@ -189,6 +218,42 @@ class TestResetMs(Base):
         ms = limits.reset_ms("resets at 3pm")
         self.assertIsNotNone(ms)
         self.assertTrue(0 < ms <= 1440 * 60000)
+
+    def test_try_again_at_time(self):
+        ms = limits.reset_ms("try again at 5:13 PM")
+        self.assertIsNotNone(ms)
+        self.assertTrue(0 < ms <= 1440 * 60000)
+
+    def test_try_again_at_datetime(self):
+        import time as _time
+        target = _time.localtime(_time.time() + 2 * 86400)
+        month = _time.strftime("%B", target)
+        text = f"try again at {month} {target.tm_mday}th, {target.tm_year} {target.tm_hour % 12 or 12}:{target.tm_min:02d} {'AM' if target.tm_hour < 12 else 'PM'}"
+        ms = limits.reset_ms(text)
+        self.assertIsNotNone(ms)
+        self.assertTrue(86400_000 < ms <= 3 * 86400_000)
+
+    def test_datetime_wrapped_and_case(self):
+        import time as _time
+        target = _time.localtime(_time.time() + 2 * 86400)
+        month = _time.strftime("%b", target)
+        text = f"TRY AGAIN\nAT  {month} {target.tm_mday}, {target.tm_year} {target.tm_hour % 12 or 12}:{target.tm_min:02d} pm"
+        self.assertIsNotNone(limits.reset_ms(text))
+
+    def test_datetime_no_year_next_occurrence(self):
+        import time as _time
+        target = _time.localtime(_time.time() - 2 * 86400)  # this year's date already past
+        month = _time.strftime("%b", target)
+        text = f"try again at {month} {target.tm_mday} {target.tm_hour % 12 or 12}:{target.tm_min:02d} PM"
+        ms = limits.reset_ms(text)
+        self.assertEqual(ms, limits.MAX_MS)  # rolled into next year, capped
+
+    def test_datetime_past_is_none(self):
+        self.assertIsNone(limits.reset_ms("try again at Sep 26th, 2020 5:13 PM"))
+
+    def test_datetime_capped_at_max(self):
+        ms = limits.reset_ms("try again at Sep 26th, 2999 5:13 PM")
+        self.assertEqual(ms, limits.MAX_MS)
 
 
 class TestConfig(Base):
@@ -240,6 +305,72 @@ class TestWhereInit(Base):
         cli("init")
         with open(dst) as fh:
             self.assertEqual(fh.read(), '{"products": {"mine": {}}}')
+
+    def test_init_minimal(self):
+        for name in ("config.json", "roster.md"):
+            p = os.path.join(self.home, name)
+            if os.path.exists(p):
+                os.remove(p)
+        code, out, _ = cli("init", "--minimal")
+        self.assertEqual(code, 0)
+        examples = os.path.join(limits.skill_dir(), "examples")
+        with open(os.path.join(examples, "config-minimal.json")) as fh:
+            want_config = fh.read()
+        with open(os.path.join(self.home, "config.json")) as fh:
+            self.assertEqual(fh.read(), want_config)
+        with open(os.path.join(examples, "roster-minimal.md")) as fh:
+            want_roster = fh.read()
+        with open(os.path.join(self.home, "roster.md")) as fh:
+            self.assertEqual(fh.read(), limits.ROSTER_COPY_NOTE + want_roster)
+        code, out, _ = cli("init", "--minimal")
+        self.assertIn("skipped", out)
+        cfg = limits.load_config()
+        self.assertIn("claude", cfg["products"])
+        self.assertNotIn("swe", cfg["products"])
+
+
+class TestExamplesConsistency(unittest.TestCase):
+    """Every bundled example config validates; every key in each roster's
+    'Keys' table resolves against the matching config."""
+
+    def _load_example_config(self, name):
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        import shutil
+        shutil.copyfile(os.path.join(limits.skill_dir(), "examples", name),
+                        os.path.join(home.name, "config.json"))
+        old = os.environ.get("MODEL_ROUTER_HOME")
+        os.environ["MODEL_ROUTER_HOME"] = home.name
+        self.addCleanup(lambda: os.environ.pop("MODEL_ROUTER_HOME", None) if old is None else os.environ.__setitem__("MODEL_ROUTER_HOME", old))
+        return limits.load_config()
+
+    def test_configs_validate(self):
+        import glob
+        paths = glob.glob(os.path.join(limits.skill_dir(), "examples", "config*.json"))
+        self.assertGreaterEqual(len(paths), 2)
+        for path in paths:
+            with self.subTest(path=path):
+                self._load_example_config(os.path.basename(path))
+
+    def test_roster_keys_resolve(self):
+        import glob
+        import re
+        for roster_path in glob.glob(os.path.join(limits.skill_dir(), "examples", "roster*.md")):
+            suffix = os.path.basename(roster_path)[len("roster"):-len(".md")]  # "" or "-minimal"
+            config_name = f"config{suffix}.json"
+            config_path = os.path.join(limits.skill_dir(), "examples", config_name)
+            if not os.path.exists(config_path):
+                continue
+            with self.subTest(roster=roster_path):
+                with open(roster_path, encoding="utf-8") as fh:
+                    text = fh.read()
+                section = re.search(r"## Keys\n(.*?)(?=\n## |\Z)", text, re.S)
+                self.assertIsNotNone(section, roster_path)
+                keys = re.findall(r"`(\w+(?::\w+)?)`", section.group(1))
+                self.assertTrue(keys, roster_path)
+                cfg = self._load_example_config(config_name)
+                for key in keys:
+                    self.assertIsNotNone(limits.resolve_key(key, cfg), f"{roster_path}: {key}")
 
 
 class TestFirstSkipsUnknown(Base):

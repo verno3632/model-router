@@ -5,7 +5,7 @@ description: Decide which AI product and model gets a piece of work (planning, f
 
 # Model routing
 
-Precedence: the user's instruction → the project's AGENTS.md / CLAUDE.md → this skill. A project's choice applies inside that project only; never carry it to another project.
+Precedence: the user's instruction → the project's AGENTS.md / CLAUDE.md → this skill. A project's choice applies inside that project only; never carry it to another project. An instruction that names a product or model wins even when the roster does not list it — "never substitute silently" below limits your own choices, not the user's. If `limits.py` has no key for it, start that child unwrapped, say so, and suggest adding it to `config.json`.
 
 This file holds what is true for everyone. Who does what is in the **roster**; how a child session is started is in a **launcher** doc. Both are chosen per user.
 
@@ -19,12 +19,12 @@ python3 $L where
 # home      ~/.agents/model-router
 # config    .../config.json
 # roster    .../roster.md
-# launcher  .../launchers/orca.md      (one line per launcher, in order of preference)
+# launcher  <this skill>/launchers/shell.md   (one line per launcher, in order of preference)
 ```
 
 1. Read the `roster` file. It is the only source of truth for models, effort levels, fallbacks and boundaries. This file refers to its sections by heading: **Keys**, **Priority**, **Launchers**, **Roles**, **Cheap-tier boundary**, **Budget**, **Formations**.
 2. Read a launcher doc when you are about to start a child — not before.
-3. If `roster` points into this skill's `examples/` directory, the user has not set up their own: use it, and tell them once that `python3 $L init` copies editable versions into `home`. If `where` warns that the roster is an unedited copy, it still describes the skill author's subscriptions, not the user's: tell them once, and expect rows naming products they do not have — those fall through as unavailable.
+3. If `roster` points into this skill's `examples/` directory, the user has not set up their own: use it, and tell them once that `python3 $L init --minimal` (or `init` for the author's full example) copies editable versions into `home`. If `where` warns that the roster is an unedited copy, it still describes the skill author's subscriptions, not the user's: tell them once, and expect rows naming products they do not have — those fall through as unavailable.
 
 ## Principles
 
@@ -34,12 +34,12 @@ python3 $L where
 - **Whoever wrote it does not review it.** The model that planned does not implement or review. Review goes to a different model family in a fresh session.
 - **UI: a model that can see decides the look first,** from a reference image, an existing screen or a screenshot — add one if the brief is text only. Once the look is fixed, the cheap tier turns it into CSS and components.
 - **Conversations do not transfer.** Only work that is complete in its task description goes out.
-- **Set model and effort in the launch arguments and confirm the actual model from the child's output.** Saving a setting is not switching.
+- **Set model and effort in the launch arguments and confirm the actual model from the child's output.** Saving a setting is not switching. When a CLI prints no model name, say in your report that the model is unconfirmed. A product with a single model takes no model argument: confirm what it picked from its output.
 - **Never substitute silently.** If the first choice is unavailable, do not stop — walk the roster's fallbacks and report where the work went. Do not use a model the roster does not list.
 
 ## Choosing
 
-1. Find the row in the roster's **Roles** table that matches the work. Rows are in pipeline order.
+1. Find the row in the roster's **Roles** table that matches the work. Rows are in pipeline order, not a checklist: small work whose brief you can write yourself skips the plan rows, and your brief is the plan. Whoever wrote the brief still does not implement or review it.
 2. Check the roster's **Cheap-tier boundary**: some work never goes to the cheap tier, even as a fallback.
 3. Before planning, reviewing or promoting, check the weekly budget (below) and apply the roster's **Budget** table.
 4. Turn the row into keys — `<product>` or `<product>:<model>`, as the roster's **Keys** table spells them — and let `limits.py first` pick the first live one (see "When a tier is dead").
@@ -75,7 +75,7 @@ The roster's budget table says what each grade changes. Surplus is spent on thin
 
 ## When a tier is dead
 
-Start every child through `limits.py` so limits are seen before launch and recorded when hit.
+Start every child through `limits.py` so limits are seen before launch and recorded when hit. The keys below are examples; yours are in the roster's **Keys** table.
 
 ```sh
 python3 $L status                                  # every product and model
@@ -88,7 +88,7 @@ python3 $L clear codex:astra                       # it came back early
 
 - `run` and `scan` exit **75** when the tier is unavailable: already recorded as limited, limited just now, or its CLI is not installed. **On 75, move to the next key.** Any other exit code from `run` is the child's own.
 - `first` exits **1** with no output when every key in the chain is dead. Do not start the work; report to the user which tiers are dead and until when (`status`). It skips keys the config does not know, with a warning.
-- Exit **2** is a usage or configuration error — most often a roster key missing from `config.json`. Tell the user what to fix; do not guess another key.
+- Exit **2** is a usage or configuration error. `run`, `scan`, `mark` and `clear` give it for a key `config.json` does not know; `first` only warns and skips such keys, so read its warnings when it exits 1. Tell the user what to fix; do not guess another key.
 - Order of retreat: the same tool one step down (the roster's "demote" column), then the "fallback" column left to right, skipping dead keys.
 - A product key (`codex`) means the whole product is limited and kills all its models; a model key (`codex:astra`) kills only that model. `--for` takes the time until the reset shown in the error.
 - Records live in `home`, are shared by every session, and expire on their own. They are written only by `run`, `scan`, `mark` and `budget`, so do not start children any other way.

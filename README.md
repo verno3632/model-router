@@ -19,10 +19,10 @@ Your roster and config live outside the repo, so `git pull` never conflicts with
 ```sh
 git clone https://github.com/verno3632/model-router ~/.agents/skills/model-router
 mkdir -p ~/.claude/skills && ln -s ~/.agents/skills/model-router ~/.claude/skills/model-router   # if Claude Code should see it
-python3 ~/.agents/skills/model-router/limits.py init                # copies roster.md and config.json to ~/.agents/model-router/
+python3 ~/.agents/skills/model-router/limits.py init --minimal      # copies a roster.md and config.json to ~/.agents/model-router/
 ```
 
-Then edit the two copied files:
+`--minimal` starts you from a two-product roster (Claude Code and Codex). Plain `init` copies the author's full four-product setup instead — a worked example of how far the tables can go. Then edit the two copied files:
 
 - `roster.md` — replace the author's subscriptions with yours. Keep the section headings, and delete the first line (the "unedited copy" marker) when you are done; until then `where` warns the agent that the roster is not yours.
 - `config.json` — list the same products and models, so `limits.py` knows the keys:
@@ -86,9 +86,13 @@ Graded by pace, not by usage: share of the week elapsed minus share used. +25 po
 
 ### Limits of the approach
 
-- Limit detection is a match on generic wording (`usage limit`, `rate limit`, `429`, `too many requests`, ...), not on each CLI's verified message. When one is missed, `mark` it and add the wording to `LIMIT_RE`.
+- Limit detection is a match on wording. Codex's messages are taken from real terminals (`You've hit your usage limit ... try again at Sep 26th, 2026 5:13 PM`), and its advisory lines (`Approaching rate limits`, `less than 5% of your weekly limit left`) are ignored. For other CLIs the patterns are generic (`usage limit`, `rate limit`, `429`, `too many requests`, ...) and unverified. When one is missed, `mark` it and add the wording to `LIMIT_RE`; when an advisory is mistaken for a limit, add it to `ADVISORY_RE`.
 - Only the last 30 lines are examined. A report that legitimately ends with "rate limit" is still recorded by mistake: `clear` it.
 - A TUI child cannot go through `run`. If the parent forgets to `scan`, nothing is recorded.
-- Reset times are read only from `try again in 3 hours 12 minutes` and `resets at 3pm`. Otherwise the record lasts 5 hours.
+- Reset times are read from `try again in 3 hours 12 minutes`, `try again at [Sep 26th, 2026] 5:13 PM` and `resets at 3pm`. Otherwise the record lasts 5 hours.
 
-Tests: `python3 -m unittest -v`.
+Tests: `python3 -m unittest -v` (run in CI on Linux and macOS, Python 3.9 and 3.12).
+
+## License
+
+MIT.

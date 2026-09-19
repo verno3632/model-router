@@ -1,0 +1,6 @@
+{
+  "products": {
+    "claude": {"models": ["haiku", "sonnet", "opus"]},
+    "codex":  {"models": []}
+  }
+}

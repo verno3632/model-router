@@ -10,7 +10,7 @@ writes one if the child stops on a limit. Standard library only.
 
   limits.py status
   limits.py where                    print the paths in use (home, config, roster, launchers)
-  limits.py init                     seed HOME_DIR with the bundled config and roster
+  limits.py init [--minimal]         seed HOME_DIR with the bundled config and roster
   limits.py budget [--refresh]       surplus / normal / tight for the week's quota
   limits.py first <key>...           first live entry from a fallback chain
   limits.py run [--log F] <key> -- <command>   launch a non-interactive child; record a limit, exit 75
@@ -214,19 +214,57 @@ LIMIT_RE = re.compile(
     r"|\b429\b|out of credits|insufficient credits|利用上限|上限に達",
     re.I,
 )
+# Advisories mention limits without being one; their lines are dropped before matching.
+ADVISORY_RE = re.compile(
+    r"approaching rate.?limits?|rate.?limit reminders|less than \d+% of your .{0,20}limit left",
+    re.I,
+)
 TAIL_LINES = 30
 EXIT_LIMITED = 75  # parents see this exit code and move to the next fallback
 
 
+MONTHS = {
+    m: i
+    for i, name in enumerate(
+        "january february march april may june july august september october november december".split(), 1
+    )
+    for m in (name, name[:3])
+}
+
+
+def _ampm_hour(h, ampm):
+    return int(h) % 12 + (12 if ampm.lower() == "pm" else 0)
+
+
 def reset_ms(text):
-    """Cooldown length from 'try again in 3 hours 12 minutes' / 'resets at 3pm'. None if unreadable."""
-    m = re.search(r"(?:again|resets?) in\s+(?:(\d+)\s*d\w*)?\s*(?:(\d+)\s*h\w*)?\s*(?:(\d+)\s*m\w*)?", text, re.I)
+    """Cooldown length from 'try again in 3 hours 12 minutes', 'resets at 3pm',
+    'try again at 5:13 PM', or 'try again at Sep 26th, 2026 5:13 PM' (local time).
+    None if unreadable or the named time is already past."""
+    flat = re.sub(r"\s+", " ", text)  # terminals wrap messages mid-phrase
+    m = re.search(r"(?:again|resets?) in\s+(?:(\d+)\s*d\w*)?\s*(?:(\d+)\s*h\w*)?\s*(?:(\d+)\s*m\w*)?", flat, re.I)
     if m and any(m.groups()):
         d, h, mi = (int(g or 0) for g in m.groups())
         return min(d * UNITS["d"] + h * UNITS["h"] + mi * UNITS["m"], MAX_MS)
-    m = re.search(r"resets?(?: at)?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)", text, re.I)
+    m = re.search(
+        r"(?:again|resets?) at\s+(\w+)\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(?:(\d{4})\s+)?(\d{1,2}):(\d{2})\s*([ap]m)\b",
+        flat, re.I,
+    )
+    if m and MONTHS.get(m.group(1).lower()):
+        month = MONTHS[m.group(1).lower()]
+        day, year = int(m.group(2)), m.group(3)
+        hour, minute = _ampm_hour(m.group(4), m.group(6)), int(m.group(5))
+        years = (int(year),) if year else (time.localtime().tm_year, time.localtime().tm_year + 1)
+        for y in years:
+            try:
+                ahead = time.mktime((y, month, day, hour, minute, 0, 0, 0, -1)) - time.time()
+            except (ValueError, OverflowError):
+                continue
+            if ahead > 0:
+                return min(int(ahead * 1000), MAX_MS)
+        return None
+    m = re.search(r"(?:again|resets?)(?:\s+at)?\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)\b", flat, re.I)
     if m:
-        hour = int(m.group(1)) % 12 + (12 if m.group(3).lower() == "pm" else 0)
+        hour = _ampm_hour(m.group(1), m.group(3))
         now = time.localtime()
         ahead = (hour * 60 + int(m.group(2) or 0)) - (now.tm_hour * 60 + now.tm_min)
         return (ahead % 1440 or 1440) * UNITS["m"]
@@ -234,7 +272,7 @@ def reset_ms(text):
 
 
 def mark_if_limited(key, lines):
-    tail = "\n".join(lines[-TAIL_LINES:])
+    tail = "\n".join(l for l in lines[-TAIL_LINES:] if not ADVISORY_RE.search(l))
     hit = LIMIT_RE.search(tail)
     if not hit:
         return False
@@ -400,12 +438,13 @@ def cmd_where(_):
     return 0
 
 
-def cmd_init(_):
+def cmd_init(args):
     import shutil
 
+    suffix = "-minimal" if args.minimal else ""
     os.makedirs(home_dir(), exist_ok=True)
     for name in ("config.json", "roster.md"):
-        src = os.path.join(skill_dir(), "examples", name)
+        src = os.path.join(skill_dir(), "examples", name.replace(".", f"{suffix}."))
         dst = os.path.join(home_dir(), name)
         if not os.path.exists(src):
             print(f"skipped {name}: no bundled example")
@@ -608,7 +647,9 @@ def main():
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("status", help="which products and models are limited").set_defaults(func=cmd_status)
     sub.add_parser("where", help="print the paths in use").set_defaults(func=cmd_where)
-    sub.add_parser("init", help="seed the home dir with bundled config and roster").set_defaults(func=cmd_init)
+    sp = sub.add_parser("init", help="seed the home dir with bundled config and roster")
+    sp.add_argument("--minimal", action="store_true", help="seed with the minimal examples instead")
+    sp.set_defaults(func=cmd_init)
     sp = sub.add_parser("mark", help="record a limit")
     sp.add_argument("key")
     sp.add_argument("--for", dest="duration", default="5h", help="cooldown length (30m / 5h / 3d, default 5h, max 7d)")
