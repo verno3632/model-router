@@ -55,6 +55,21 @@ python3 $L clear codex:astra                        # 記録を消す
 
 記録は `~/.agents/model-router-limits.json`（`{キー: 期限の epoch ミリ秒}`）。全セッションで共有し、期限が来れば無視される。環境変数 `MODEL_ROUTER_LIMITS_FILE` で差し替えられる。
 
+### 週枠の余り具合（budget）
+
+```sh
+python3 $L budget            # 5 分キャッシュ。--refresh で取り直す
+# claude  余り   週 51% 使用 / 87% 経過（+36）。リセット 04:00。5h 枠 24%
+# codex   普通   週 1% 使用 / 0% 経過（-1）。リセット 09-27 05:38
+```
+
+使用率ではなくペース（週の経過割合 − 使用率）で見る。+25 ポイント以上で余り、−15 ポイント以下か使用率 85% 以上で節約。Claude は 5 時間枠が 80% を超えていると余りにしない。余りのときに何を格上げするかは `SKILL.md` の「週枠の余り具合」にある。実装は余っていても SWE-2 のまま。
+
+- Claude は macOS の Keychain（`Claude Code-credentials`）、Codex は `~/.codex/auth.json` のトークンで各社の利用状況 API を読む。どちらも非公開の API で、形が変われば取得できず「普通」に倒れる。
+- トークンはどこにも書き出さない。キャッシュ `~/.agents/model-router-budget.json` に残るのは割合と時刻だけ。
+- API が「上限に達した」「このモデルは利用不可」と返した枠は、枠切れの記録へ自動で写す。
+- Devin と Grok は利用率を取れないので対象外。
+
 ### 限界
 
 - 上限の検出は `usage limit` / `rate limit` / `limit reached` / `429` / `too many requests` などの一般的な文言の一致で、各 CLI が実際に出す文言で確かめたものではない。拾えなかったら `mark` で手で書き、文言を `LIMIT_RE` に足す。

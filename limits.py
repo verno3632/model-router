@@ -6,7 +6,8 @@
 標準ライブラリのみ。
 
   limits.py status
-  limits.py first <key>...           フォールバックの並びから生きている最初の段
+  limits.py budget [--refresh]       Claude / Codex の週枠が余り・普通・節約のどれか
+  limits.py first <key>...         フォールバックの並びから生きている最初の段
   limits.py run <key> -- <command>   非対話の子を起動。上限なら記録して終了コード 75
   limits.py scan <key> [--file F]    TUI の子の出力を読み、上限なら記録して 75
   limits.py mark <key> [--for 5h]
@@ -227,6 +228,147 @@ def cmd_run(args):
     return EXIT_LIMITED if mark_if_limited(args.key, list(tail)) else code
 
 
+# ---------- 週枠の余り具合 ----------
+# 使用率そのものではなくペースで見る。余裕 = 週の経過割合 − 使用率（ポイント）。
+# リセット前日に 50% なら余り、リセット翌日に 50% なら使いすぎ、を同じ式で扱える。
+BUDGET_CACHE = os.path.expanduser("~/.agents/model-router-budget.json")  # 割合と時刻だけ。トークンは書かない
+BUDGET_TTL = 300
+SURPLUS_AT, TIGHT_AT, TIGHT_USED, FIVE_HOUR_GATE = 25, -15, 85, 80
+
+
+def fetch_json(url, headers):
+    import urllib.request
+
+    req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "model-router-limits", **headers})
+    with urllib.request.urlopen(req, timeout=10) as res:
+        return json.load(res)
+
+
+def iso_to_epoch(text):
+    from datetime import datetime
+
+    return datetime.fromisoformat(text).timestamp() if text else None
+
+
+def claude_usage():
+    import subprocess
+
+    raw = subprocess.run(
+        ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+        capture_output=True, text=True, timeout=10,
+    ).stdout
+    token = json.loads(raw)["claudeAiOauth"]["accessToken"]
+    data = fetch_json(
+        "https://api.anthropic.com/api/oauth/usage",
+        {"Authorization": f"Bearer {token}", "anthropic-beta": "oauth-2025-04-20"},
+    )
+    week = data.get("seven_day") or {}
+    out = {"week": {"used": week.get("utilization"), "resets": iso_to_epoch(week.get("resets_at")), "span": 7 * 86400}}
+    five = data.get("five_hour") or {}
+    out["five_hour"] = five.get("utilization")
+    # モデル別の週枠（seven_day_opus など）は、プランによって null で返る
+    out["models"] = {
+        k[len("seven_day_"):]: {"used": v.get("utilization"), "resets": iso_to_epoch(v.get("resets_at")), "span": 7 * 86400}
+        for k, v in data.items()
+        if k.startswith("seven_day_") and isinstance(v, dict) and v.get("resets_at")
+    }
+    return out
+
+
+def codex_usage():
+    with open(os.path.expanduser("~/.codex/auth.json"), encoding="utf-8") as fh:
+        tokens = json.load(fh).get("tokens") or {}
+    data = fetch_json(
+        "https://chatgpt.com/backend-api/wham/usage",
+        {"Authorization": f"Bearer {tokens['access_token']}", "ChatGPT-Account-Id": tokens.get("account_id", "")},
+    )
+    limit = data.get("rate_limit") or {}
+    win = limit.get("primary_window") or {}
+    out = {"week": {"used": win.get("used_percent"), "resets": win.get("reset_at"), "span": win.get("limit_window_seconds")}}
+    out["reached"] = bool(limit.get("limit_reached"))
+    # モデル単位で止まっているもの。{"astra": 復活の epoch 秒 or None}
+    out["blocked"] = {
+        name.rsplit("-", 1)[-1]: info.get("available_at")
+        for name, info in (data.get("model_usage") or {}).items()
+        if isinstance(info, dict) and info.get("available") is False
+    }
+    return out
+
+
+def load_budget(refresh):
+    try:
+        with open(BUDGET_CACHE, encoding="utf-8") as fh:
+            cached = json.load(fh)
+        if not refresh and time.time() - cached.get("at", 0) < BUDGET_TTL:
+            return cached
+    except (OSError, ValueError):
+        pass
+    fresh = {"at": time.time()}
+    for name, fetch in (("claude", claude_usage), ("codex", codex_usage)):
+        try:
+            fresh[name] = fetch()
+        except Exception as err:  # 取れなければ「普通」に倒す。理由だけ残す
+            fresh[name] = {"error": f"{type(err).__name__}: {err}"[:120]}
+    tmp = BUDGET_CACHE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(fresh, fh)
+    os.replace(tmp, BUDGET_CACHE)
+    return fresh
+
+
+def grade(window):
+    """(状態, 説明)。数字が欠けていれば普通。"""
+    used, resets, span = (window or {}).get("used"), (window or {}).get("resets"), (window or {}).get("span")
+    if used is None or not resets or not span:
+        return "普通", "数字が取れない"
+    elapsed = min(max(1 - (resets - time.time()) / span, 0), 1) * 100
+    room = elapsed - used
+    text = f"週 {used:.0f}% 使用 / {elapsed:.0f}% 経過（{room:+.0f}）。リセット {until_text(resets * 1000)}"
+    if used >= TIGHT_USED or room <= TIGHT_AT:
+        return "節約", text
+    return ("余り" if room >= SURPLUS_AT else "普通"), text
+
+
+def auto_mark(key, until_epoch):
+    """API が「止まっている」と言っている枠を記録へ写す。期限が読めなければ 5h。"""
+    state = load()
+    until_ms = int(until_epoch * 1000) if until_epoch else int(time.time() * 1000) + 5 * UNITS["h"]
+    if state.get(key, 0) < until_ms:
+        state[key] = min(until_ms, int(time.time() * 1000) + MAX_MS)
+        save(state)
+
+
+def cmd_budget(args):
+    data = load_budget(args.refresh)
+    for product in ("claude", "codex"):
+        info = data.get(product) or {}
+        if "error" in info:
+            print(f"{product:<7} 普通   取得できず（{info['error']}）")
+            continue
+        state, text = grade(info.get("week"))
+        week = info.get("week") or {}
+        if (week.get("used") or 0) >= 100 or info.get("reached"):
+            auto_mark(product, week.get("resets"))
+        if product == "claude":
+            five = info.get("five_hour")
+            if five is not None:
+                text += f"。5h 枠 {five:.0f}%"
+                if state == "余り" and five > FIVE_HOUR_GATE:
+                    state, text = "普通", text + f"（{FIVE_HOUR_GATE}% 超なので格上げしない）"
+        print(f"{product:<7} {state}   {text}")
+        for model, window in (info.get("models") or {}).items():
+            m_state, m_text = grade(window)
+            print(f"  {model:<9} {m_state}   {m_text}")
+            if (window.get("used") or 0) >= 100:
+                auto_mark(model, window.get("resets"))
+        for model, available_at in (info.get("blocked") or {}).items():
+            print(f"  {model:<9} 上限   API が利用不可と返した")
+            auto_mark(f"codex:{model}", available_at)
+    age = time.time() - data.get("at", 0)
+    print(f"（{age:.0f} 秒前の取得。--refresh で取り直す）")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(prog="limits.py", description="枠切れの記録")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -238,6 +380,9 @@ def main():
     sp = sub.add_parser("clear", help="記録を消す")
     sp.add_argument("key")
     sp.set_defaults(func=cmd_clear)
+    sp = sub.add_parser("budget", help="Claude / Codex の週枠が余り・普通・節約のどれか")
+    sp.add_argument("--refresh", action="store_true", help="キャッシュ（5 分）を使わず取り直す")
+    sp.set_defaults(func=cmd_budget)
     sp = sub.add_parser("first", help="フォールバックの並びから、生きている最初の段を返す")
     sp.add_argument("keys", nargs="+")
     sp.set_defaults(func=cmd_first)
