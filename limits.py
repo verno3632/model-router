@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
-"""枠切れの記録。model-router skill が委譲の前に読み、上限に当たったら書く。
+"""Record of exhausted rate limits. The model-router skill reads this before
+delegating and writes to it when a limit is hit.
 
-記録先は ~/.agents/model-router-limits.json（{キー: 期限の epoch ミリ秒}）。この skill 専用。
-親は子セッションを run 経由で起動する。run は起動前に記録を見て、子が上限で止まったら書く。
-標準ライブラリのみ。
+State lives in $MODEL_ROUTER_LIMITS_FILE, else $MODEL_ROUTER_HOME/limits.json
+({key: deadline in epoch ms}). HOME_DIR is $MODEL_ROUTER_HOME or
+~/.agents/model-router/. Products and models come from a config file, not this
+file. Parents launch child sessions via `run`: it checks the records first and
+writes one if the child stops on a limit. Standard library only.
 
   limits.py status
-  limits.py budget [--refresh]       Claude / Codex の週枠が余り・普通・節約のどれか
-  limits.py first <key>...         フォールバックの並びから生きている最初の段
-  limits.py run <key> -- <command>   非対話の子を起動。上限なら記録して終了コード 75
-  limits.py scan <key> [--file F]    TUI の子の出力を読み、上限なら記録して 75
+  limits.py where                    print the paths in use (home, config, roster, launchers)
+  limits.py init                     seed HOME_DIR with the bundled config and roster
+  limits.py budget [--refresh]       surplus / normal / tight for the week's quota
+  limits.py first <key>...           first live entry from a fallback chain
+  limits.py run [--log F] <key> -- <command>   launch a non-interactive child; record a limit, exit 75
+  limits.py scan <key> [--file F]    read a TUI child's output; record a limit, exit 75
   limits.py mark <key> [--for 5h]
   limits.py clear <key>
 """
@@ -20,25 +25,116 @@ import re
 import sys
 import time
 
-FILE = os.environ.get(
-    "MODEL_ROUTER_LIMITS_FILE", os.path.expanduser("~/.agents/model-router-limits.json")
-)
-
-# 製品 → その製品の中で個別に枯れうるモデル。製品名そのものもキーになる（全モデル共通の上限）。
-PRODUCTS = {
-    "swe": (),
-    "claude": ("haiku", "sonnet", "opus", "fable"),
-    "codex": ("codex:astra", "codex:sol", "codex:luna", "codex:terra"),
-    "grok": (),
-}
-SWE_FREE_UNTIL = "2026-10-10"
-MAX_MS = 7 * 86_400_000  # 週次の上限まで書けるように 7 日
+MAX_MS = 7 * 86_400_000  # allow recording up to weekly limits
 UNITS = {"m": 60_000, "h": 3_600_000, "d": 86_400_000}
+NAME_RE = re.compile(r"[a-z0-9_-]+")
+MODEL_RE = re.compile(r"[a-z0-9_.-]+")
 
+
+def skill_dir():
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def home_dir():
+    return os.path.expanduser(os.environ.get("MODEL_ROUTER_HOME", "~/.agents/model-router"))
+
+
+def state_file():
+    return os.environ.get("MODEL_ROUTER_LIMITS_FILE") or os.path.join(home_dir(), "limits.json")
+
+
+def budget_cache():
+    return os.path.join(home_dir(), "budget.json")
+
+
+def fail(msg):
+    print(f"limits: {msg}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+# ---------- config ----------
+
+def config_path():
+    """User config wins; else the bundled example. None if neither exists."""
+    user = os.path.join(home_dir(), "config.json")
+    if os.path.exists(user):
+        return user
+    bundled = os.path.join(skill_dir(), "examples", "config.json")
+    return bundled if os.path.exists(bundled) else None
+
+
+def default_launchers():
+    import shutil
+
+    out = ["orca"] if shutil.which("orca") else []
+    out.append("shell")
+    if shutil.which("tmux"):
+        out.append("tmux")
+    out.append("subagent")
+    return out
+
+
+def load_config():
+    """Validated {products: {name: {models: [...], free_until: str|None}}, launchers: [...]}."""
+    path = config_path()
+    if path is None:
+        fail(f"no config: {os.path.join(home_dir(), 'config.json')} not found and no bundled example")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except (OSError, ValueError) as err:
+        fail(f"bad config {path}: {err}")
+    products = raw.get("products") if isinstance(raw, dict) else None
+    if not isinstance(products, dict) or not products:
+        fail(f"bad config {path}: 'products' must be a non-empty object")
+    out = {}
+    for name, spec in products.items():
+        if not NAME_RE.fullmatch(name) or not isinstance(spec, dict):
+            fail(f"bad config {path}: invalid product {name!r}")
+        models = spec.get("models", [])
+        free_until = spec.get("free_until")
+        if not isinstance(models, list) or any(not MODEL_RE.fullmatch(str(m)) for m in models):
+            fail(f"bad config {path}: invalid models for {name!r}")
+        if free_until is not None and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(free_until)):
+            fail(f"bad config {path}: invalid free_until for {name!r}")
+        out[name] = {"models": [str(m) for m in models], "free_until": free_until}
+    launchers = raw.get("launchers")
+    if launchers is None:
+        launchers = default_launchers()
+    elif not isinstance(launchers, list) or any(not isinstance(x, str) for x in launchers):
+        fail(f"bad config {path}: 'launchers' must be a list of names")
+    return {"products": out, "launchers": launchers, "path": path}
+
+
+def norm_key(key, cfg):
+    """Canonical '<product>' or '<product>:<model>'. Bare models resolve only when
+    exactly one product lists them."""
+    products = cfg["products"]
+    if ":" in key:
+        product, model = key.split(":", 1)
+        if product not in products:
+            fail(unknown_msg(key, cfg))
+        return key
+    if key in products:
+        return key
+    owners = [p for p, spec in products.items() if key in spec["models"]]
+    if len(owners) == 1:
+        return f"{owners[0]}:{key}"
+    fail(unknown_msg(key, cfg))
+
+
+def unknown_msg(key, cfg):
+    listing = " ".join(
+        f"{p}({','.join(s['models']) or '-'})" for p, s in cfg["products"].items()
+    )
+    return f"unknown or ambiguous key: {key}\n  configured: {listing}"
+
+
+# ---------- state ----------
 
 def load():
     try:
-        with open(FILE, encoding="utf-8") as fh:
+        with open(state_file(), encoding="utf-8") as fh:
             state = json.load(fh)
     except (OSError, ValueError):
         return {}
@@ -46,10 +142,11 @@ def load():
 
 
 def save(state):
-    tmp = FILE + ".tmp"
+    os.makedirs(home_dir(), exist_ok=True)
+    tmp = state_file() + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(state, fh)
-    os.replace(tmp, FILE)
+    os.replace(tmp, state_file())
 
 
 def cooling():
@@ -62,97 +159,47 @@ def until_text(ms):
     return time.strftime(fmt, time.localtime(ms / 1000))
 
 
-def markable(key):
-    known = set(PRODUCTS) | {m for models in PRODUCTS.values() for m in models}
-    return key in known or re.fullmatch(r"codex:[a-z0-9_-]+", key) is not None
-
-
 def parse_duration(text):
     m = re.fullmatch(r"(\d+)([mhd])", text or "")
     return min(int(m.group(1)) * UNITS[m.group(2)], MAX_MS) if m else None
 
 
-def fail(msg):
-    print(f"limits: {msg}", file=sys.stderr)
-    raise SystemExit(2)
+def free_until(product, cfg):
+    """free_until of the product owning this key, else None."""
+    return cfg["products"].get(product.split(":")[0], {}).get("free_until")
 
 
-def check_key(key):
-    if not markable(key):
-        fail(f"知らないキー: {key}\n  使えるキー: swe grok claude haiku sonnet opus fable codex codex:<モデル名>")
+def expired(product, cfg):
+    until = free_until(product, cfg)
+    return until is not None and time.strftime("%Y-%m-%d") > until
 
 
-def cmd_status(_):
-    cool = cooling()
-    for product, models in PRODUCTS.items():
-        if product in cool:
-            ok, why = False, f"全体が上限（{until_text(cool[product])}まで）"
-        elif product == "swe" and time.strftime("%Y-%m-%d") > SWE_FREE_UNTIL:
-            ok, why = False, f"無料期限（{SWE_FREE_UNTIL}）切れ。全滅として扱う"
-        else:
-            dead = [m for m in models if m in cool]
-            alive = [m.split(":")[-1] for m in models if m not in cool]
-            ok = not models or bool(alive)
-            why = "使える" if not dead else (
-                "上限: " + "、".join(f"{m.split(':')[-1]}（{until_text(cool[m])}まで）" for m in dead)
-                + (f"。使える: {' '.join(alive)}" if alive else "")
-            )
-        print(f"{'○' if ok else '×'} {product:<7} {why}")
-    # `codex:<表に無いモデル名>` で記録したぶんなど、上の表に出ないキー
-    known = set(PRODUCTS) | {m for models in PRODUCTS.values() for m in models}
-    for key, until in sorted(cool.items(), key=lambda kv: kv[1]):
-        if key not in known:
-            print(f"  {key}  {until_text(until)} まで")
-    return 0
+def product_of(key, cfg):
+    return key.split(":")[0]
 
 
-def cmd_mark(args):
-    check_key(args.key)
-    ms = parse_duration(args.duration)
-    if ms is None:
-        fail(f"期間の形が違う: {args.duration}（30m / 5h / 3d）")
-    state = load()
-    state[args.key] = int(time.time() * 1000) + ms
-    save(state)
-    print(f"{args.key}  {until_text(state[args.key])} まで")
-    return 0
-
-
-def cmd_clear(args):
-    check_key(args.key)
-    state = load()
-    if state.pop(args.key, None) is not None:
-        save(state)
-    return 0
-
-
-def product_of(key):
-    if key in PRODUCTS:
-        return key
-    return "codex" if key.startswith("codex:") else "claude"
-
-
-def dead_until(key, cool):
-    """キー自身か、その製品全体が冷却中なら期限を返す。生きていれば None。"""
-    if key == "swe" and time.strftime("%Y-%m-%d") > SWE_FREE_UNTIL:
+def dead_until(key, cool, cfg):
+    """Deadline if the key itself or its whole product is cooling. None if alive."""
+    if expired(key, cfg):
         return float("inf")
-    hits = [cool[k] for k in (key, product_of(key)) if k in cool]
+    hits = [cool[k] for k in (key, product_of(key, cfg)) if k in cool]
     return max(hits) if hits else None
 
 
-# 上限で止まったときに各 CLI が出す文言。調査結果の本文に紛れた語で誤検出しないよう、
-# 見るのは出力の末尾 TAIL_LINES 行だけ。
+# ---------- limit detection ----------
+# Phrases each CLI prints when it stops on a limit. Only the last TAIL_LINES are
+# scanned so words inside a report's body don't false-positive.
 LIMIT_RE = re.compile(
     r"usage limit|rate.?limit|limit reached|hit your .{0,20}limit|quota exceeded|too many requests"
     r"|\b429\b|out of credits|insufficient credits|利用上限|上限に達",
     re.I,
 )
 TAIL_LINES = 30
-EXIT_LIMITED = 75  # 親はこの終了コードを見たら次の段へ進む
+EXIT_LIMITED = 75  # parents see this exit code and move to the next fallback
 
 
 def reset_ms(text):
-    """「try again in 3 hours 12 minutes」「resets at 3pm」から復活までの長さを読む。読めなければ None。"""
+    """Cooldown length from 'try again in 3 hours 12 minutes' / 'resets at 3pm'. None if unreadable."""
     m = re.search(r"(?:again|resets?) in\s+(?:(\d+)\s*d\w*)?\s*(?:(\d+)\s*h\w*)?\s*(?:(\d+)\s*m\w*)?", text, re.I)
     if m and any(m.groups()):
         d, h, mi = (int(g or 0) for g in m.groups())
@@ -174,49 +221,107 @@ def mark_if_limited(key, lines):
     state = load()
     state[key] = int(time.time() * 1000) + (reset_ms(tail) or UNITS["h"] * 5)
     save(state)
-    print(f"limits: {key} が上限（「{hit.group(0)}」を検出）。{until_text(state[key])} まで記録した", file=sys.stderr)
+    print(f"limits: {key} hit a limit (matched {hit.group(0)!r}); recorded until {until_text(state[key])}", file=sys.stderr)
     return True
 
 
-def cmd_first(args):
+# ---------- commands ----------
+
+def cmd_status(_):
+    cfg = load_config()
     cool = cooling()
-    for key in args.keys:
-        check_key(key)
-        if dead_until(key, cool) is None:
+    for product, spec in cfg["products"].items():
+        models = [f"{product}:{m}" for m in spec["models"]]
+        if product in cool:
+            ok, why = False, f"all limited (until {until_text(cool[product])})"
+        elif expired(product, cfg):
+            ok, why = False, f"free tier ended {spec['free_until']}; treating as dead"
+        else:
+            dead = [m for m in models if m in cool]
+            alive = [m.split(":")[-1] for m in models if m not in cool]
+            ok = not models or bool(alive)
+            why = "usable" if not dead else (
+                "limited: " + ", ".join(f"{m.split(':')[-1]} (until {until_text(cool[m])})" for m in dead)
+                + (f". usable: {' '.join(alive)}" if alive else "")
+            )
+        print(f"{'ok' if ok else 'DEAD'} {product:<7} {why}")
+    # keys not in the table, e.g. recorded as <product>:<unlisted model>
+    known = set(cfg["products"]) | {
+        f"{p}:{m}" for p, s in cfg["products"].items() for m in s["models"]
+    }
+    for key, until in sorted(cool.items(), key=lambda kv: kv[1]):
+        if key not in known:
+            print(f"  {key}  until {until_text(until)}")
+    return 0
+
+
+def cmd_mark(args):
+    key = norm_key(args.key, load_config())
+    ms = parse_duration(args.duration)
+    if ms is None:
+        fail(f"bad duration: {args.duration} (30m / 5h / 3d)")
+    state = load()
+    state[key] = int(time.time() * 1000) + ms
+    save(state)
+    print(f"{key}  until {until_text(state[key])}")
+    return 0
+
+
+def cmd_clear(args):
+    key = norm_key(args.key, load_config())
+    state = load()
+    if state.pop(key, None) is not None:
+        save(state)
+    return 0
+
+
+def cmd_first(args):
+    cfg = load_config()
+    cool = cooling()
+    for arg in args.keys:
+        key = norm_key(arg, cfg)
+        if dead_until(key, cool, cfg) is None:
             print(key)
             return 0
-    print("limits: 挙げた段はすべて上限", file=sys.stderr)
+    print("limits: every listed key is limited", file=sys.stderr)
     return 1
 
 
 def cmd_scan(args):
-    check_key(args.key)
+    key = norm_key(args.key, load_config())
     text = open(args.file, encoding="utf-8", errors="replace").read() if args.file else sys.stdin.read()
-    return EXIT_LIMITED if mark_if_limited(args.key, text.splitlines()) else 0
+    return EXIT_LIMITED if mark_if_limited(key, text.splitlines()) else 0
 
 
 def cmd_run(args):
-    """子を起動する前に記録を見て、死んでいれば起動しない。起動したら出力を素通ししつつ末尾を見張る。"""
+    """Check records before launching a child; don't start a dead one. While it
+    runs, pass output through and watch the tail."""
     import collections
     import subprocess
     import threading
 
-    check_key(args.key)
+    cfg = load_config()
+    key = norm_key(args.key, cfg)
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not command:
-        fail("起動するコマンドが無い（limits.py run <key> -- <command...>）")
-    until = dead_until(args.key, cooling())
+        fail("no command to run (limits.py run <key> -- <command...>)")
+    until = dead_until(key, cooling(), cfg)
     if until is not None:
-        when = "無料期限切れ" if until == float("inf") else f"{until_text(until)} まで"
-        print(f"limits: {args.key} は上限（{when}）。起動しない", file=sys.stderr)
+        when = "free tier ended" if until == float("inf") else f"until {until_text(until)}"
+        print(f"limits: {key} is limited ({when}); not starting", file=sys.stderr)
         return EXIT_LIMITED
     tail = collections.deque(maxlen=TAIL_LINES)
+    # Some launchers drop a terminal's output once the child exits; --log keeps the report.
+    log = open(args.log, "w", encoding="utf-8") if args.log else None
     proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
 
     def pump(src, dst):
         for line in src:
             dst.write(line)
             dst.flush()
+            if log:
+                log.write(line)
+                log.flush()
             tail.append(line.rstrip("\n"))
 
     threads = [threading.Thread(target=pump, args=p) for p in ((proc.stdout, sys.stdout), (proc.stderr, sys.stderr))]
@@ -225,13 +330,47 @@ def cmd_run(args):
     code = proc.wait()
     for t in threads:
         t.join()
-    return EXIT_LIMITED if mark_if_limited(args.key, list(tail)) else code
+    if log:
+        log.close()
+    return EXIT_LIMITED if mark_if_limited(key, list(tail)) else code
 
 
-# ---------- 週枠の余り具合 ----------
-# 使用率そのものではなくペースで見る。余裕 = 週の経過割合 − 使用率（ポイント）。
-# リセット前日に 50% なら余り、リセット翌日に 50% なら使いすぎ、を同じ式で扱える。
-BUDGET_CACHE = os.path.expanduser("~/.agents/model-router-budget.json")  # 割合と時刻だけ。トークンは書かない
+def cmd_where(_):
+    cfg = load_config()
+    rows = [
+        ("home", home_dir()),
+        ("config", cfg["path"]),
+        ("roster", os.path.join(home_dir(), "roster.md")
+         if os.path.exists(os.path.join(home_dir(), "roster.md"))
+         else os.path.join(skill_dir(), "examples", "roster.md")),
+    ]
+    rows += [("launcher", os.path.join(skill_dir(), "launchers", f"{name}.md")) for name in cfg["launchers"]]
+    for name, path in rows:
+        print(f"{name}\t{path}")
+    return 0
+
+
+def cmd_init(_):
+    import shutil
+
+    os.makedirs(home_dir(), exist_ok=True)
+    for name in ("config.json", "roster.md"):
+        src = os.path.join(skill_dir(), "examples", name)
+        dst = os.path.join(home_dir(), name)
+        if not os.path.exists(src):
+            print(f"skipped {name}: no bundled example")
+        elif os.path.exists(dst):
+            print(f"skipped {dst}: already exists")
+        else:
+            shutil.copyfile(src, dst)
+            print(f"copied {src} -> {dst}")
+    print(f"edit {os.path.join(home_dir(), 'config.json')} and roster.md for your setup")
+    return 0
+
+
+# ---------- weekly budget ----------
+# Pace, not raw usage. Headroom = elapsed share of the week - usage (points).
+# 50% the day before reset is surplus; 50% the day after is overspending — same formula.
 BUDGET_TTL = 300
 SURPLUS_AT, TIGHT_AT, TIGHT_USED, FIVE_HOUR_GATE = 25, -15, 85, 80
 
@@ -250,23 +389,36 @@ def iso_to_epoch(text):
     return datetime.fromisoformat(text).timestamp() if text else None
 
 
-def claude_usage():
+def claude_token():
+    """OAuth token from macOS Keychain, else ~/.claude/.credentials.json."""
     import subprocess
 
-    raw = subprocess.run(
-        ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
-        capture_output=True, text=True, timeout=10,
-    ).stdout
-    token = json.loads(raw)["claudeAiOauth"]["accessToken"]
+    raw = None
+    if sys.platform == "darwin":
+        try:
+            res = subprocess.run(
+                ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+                capture_output=True, text=True, timeout=10,
+            )
+            raw = res.stdout if res.returncode == 0 else None
+        except (OSError, subprocess.TimeoutExpired):
+            raw = None
+    if raw is None:
+        with open(os.path.expanduser("~/.claude/.credentials.json"), encoding="utf-8") as fh:
+            raw = fh.read()
+    return json.loads(raw)["claudeAiOauth"]["accessToken"]
+
+
+def claude_usage():
     data = fetch_json(
         "https://api.anthropic.com/api/oauth/usage",
-        {"Authorization": f"Bearer {token}", "anthropic-beta": "oauth-2025-04-20"},
+        {"Authorization": f"Bearer {claude_token()}", "anthropic-beta": "oauth-2025-04-20"},
     )
     week = data.get("seven_day") or {}
     out = {"week": {"used": week.get("utilization"), "resets": iso_to_epoch(week.get("resets_at")), "span": 7 * 86400}}
     five = data.get("five_hour") or {}
     out["five_hour"] = five.get("utilization")
-    # モデル別の週枠（seven_day_opus など）は、プランによって null で返る
+    # per-model weekly windows (seven_day_opus etc.) come back null on some plans
     out["models"] = {
         k[len("seven_day_"):]: {"used": v.get("utilization"), "resets": iso_to_epoch(v.get("resets_at")), "span": 7 * 86400}
         for k, v in data.items()
@@ -286,7 +438,7 @@ def codex_usage():
     win = limit.get("primary_window") or {}
     out = {"week": {"used": win.get("used_percent"), "resets": win.get("reset_at"), "span": win.get("limit_window_seconds")}}
     out["reached"] = bool(limit.get("limit_reached"))
-    # モデル単位で止まっているもの。{"astra": 復活の epoch 秒 or None}
+    # models currently stopped. {"astra": resume epoch or None}
     out["blocked"] = {
         name.rsplit("-", 1)[-1]: info.get("available_at")
         for name, info in (data.get("model_usage") or {}).items()
@@ -295,42 +447,48 @@ def codex_usage():
     return out
 
 
-def load_budget(refresh):
+def load_budget(refresh, cfg):
+    path = budget_cache()
     try:
-        with open(BUDGET_CACHE, encoding="utf-8") as fh:
+        with open(path, encoding="utf-8") as fh:
             cached = json.load(fh)
         if not refresh and time.time() - cached.get("at", 0) < BUDGET_TTL:
             return cached
     except (OSError, ValueError):
         pass
     fresh = {"at": time.time()}
-    for name, fetch in (("claude", claude_usage), ("codex", codex_usage)):
+    fetchers = {"claude": claude_usage, "codex": codex_usage}
+    for name in cfg["products"]:
+        fetch = fetchers.get(name)
+        if fetch is None:
+            continue  # no fetcher for this product
         try:
             fresh[name] = fetch()
-        except Exception as err:  # 取れなければ「普通」に倒す。理由だけ残す
+        except Exception as err:  # fall back to 'normal'; keep only the reason
             fresh[name] = {"error": f"{type(err).__name__}: {err}"[:120]}
-    tmp = BUDGET_CACHE + ".tmp"
+    os.makedirs(home_dir(), exist_ok=True)
+    tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(fresh, fh)
-    os.replace(tmp, BUDGET_CACHE)
+    os.replace(tmp, path)
     return fresh
 
 
 def grade(window):
-    """(状態, 説明)。数字が欠けていれば普通。"""
+    """(state, description). Missing numbers mean 'normal'."""
     used, resets, span = (window or {}).get("used"), (window or {}).get("resets"), (window or {}).get("span")
     if used is None or not resets or not span:
-        return "普通", "数字が取れない"
+        return "normal", "no numbers"
     elapsed = min(max(1 - (resets - time.time()) / span, 0), 1) * 100
     room = elapsed - used
-    text = f"週 {used:.0f}% 使用 / {elapsed:.0f}% 経過（{room:+.0f}）。リセット {until_text(resets * 1000)}"
+    text = f"week {used:.0f}% used / {elapsed:.0f}% elapsed ({room:+.0f}); resets {until_text(resets * 1000)}"
     if used >= TIGHT_USED or room <= TIGHT_AT:
-        return "節約", text
-    return ("余り" if room >= SURPLUS_AT else "普通"), text
+        return "tight", text
+    return ("surplus" if room >= SURPLUS_AT else "normal"), text
 
 
 def auto_mark(key, until_epoch):
-    """API が「止まっている」と言っている枠を記録へ写す。期限が読めなければ 5h。"""
+    """Copy a limit the API reports into the records. 5h if no deadline is readable."""
     state = load()
     until_ms = int(until_epoch * 1000) if until_epoch else int(time.time() * 1000) + 5 * UNITS["h"]
     if state.get(key, 0) < until_ms:
@@ -339,11 +497,14 @@ def auto_mark(key, until_epoch):
 
 
 def cmd_budget(args):
-    data = load_budget(args.refresh)
-    for product in ("claude", "codex"):
-        info = data.get(product) or {}
+    cfg = load_config()
+    data = load_budget(args.refresh, cfg)
+    for product in cfg["products"]:
+        if product not in data:
+            continue
+        info = data[product] or {}
         if "error" in info:
-            print(f"{product:<7} 普通   取得できず（{info['error']}）")
+            print(f"{product:<7} normal   fetch failed ({info['error']})")
             continue
         state, text = grade(info.get("week"))
         week = info.get("week") or {}
@@ -352,45 +513,48 @@ def cmd_budget(args):
         if product == "claude":
             five = info.get("five_hour")
             if five is not None:
-                text += f"。5h 枠 {five:.0f}%"
-                if state == "余り" and five > FIVE_HOUR_GATE:
-                    state, text = "普通", text + f"（{FIVE_HOUR_GATE}% 超なので格上げしない）"
+                text += f"; 5h window {five:.0f}%"
+                if state == "surplus" and five > FIVE_HOUR_GATE:
+                    state, text = "normal", text + f" (over {FIVE_HOUR_GATE}%, not upgrading)"
         print(f"{product:<7} {state}   {text}")
         for model, window in (info.get("models") or {}).items():
             m_state, m_text = grade(window)
             print(f"  {model:<9} {m_state}   {m_text}")
             if (window.get("used") or 0) >= 100:
-                auto_mark(model, window.get("resets"))
+                auto_mark(f"{product}:{model}", window.get("resets"))
         for model, available_at in (info.get("blocked") or {}).items():
-            print(f"  {model:<9} 上限   API が利用不可と返した")
-            auto_mark(f"codex:{model}", available_at)
+            print(f"  {model:<9} limited   API reports unavailable")
+            auto_mark(f"{product}:{model}", available_at)
     age = time.time() - data.get("at", 0)
-    print(f"（{age:.0f} 秒前の取得。--refresh で取り直す）")
+    print(f"(fetched {age:.0f}s ago; --refresh to fetch again)")
     return 0
 
 
 def main():
-    parser = argparse.ArgumentParser(prog="limits.py", description="枠切れの記録")
+    parser = argparse.ArgumentParser(prog="limits.py", description="record of exhausted rate limits")
     sub = parser.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("status", help="どの製品・モデルが上限に当たっているか").set_defaults(func=cmd_status)
-    sp = sub.add_parser("mark", help="上限に当たったと記録する")
+    sub.add_parser("status", help="which products and models are limited").set_defaults(func=cmd_status)
+    sub.add_parser("where", help="print the paths in use").set_defaults(func=cmd_where)
+    sub.add_parser("init", help="seed the home dir with bundled config and roster").set_defaults(func=cmd_init)
+    sp = sub.add_parser("mark", help="record a limit")
     sp.add_argument("key")
-    sp.add_argument("--for", dest="duration", default="5h", help="復活までの長さ（30m / 5h / 3d、既定 5h、上限 7d）")
+    sp.add_argument("--for", dest="duration", default="5h", help="cooldown length (30m / 5h / 3d, default 5h, max 7d)")
     sp.set_defaults(func=cmd_mark)
-    sp = sub.add_parser("clear", help="記録を消す")
+    sp = sub.add_parser("clear", help="drop a record")
     sp.add_argument("key")
     sp.set_defaults(func=cmd_clear)
-    sp = sub.add_parser("budget", help="Claude / Codex の週枠が余り・普通・節約のどれか")
-    sp.add_argument("--refresh", action="store_true", help="キャッシュ（5 分）を使わず取り直す")
+    sp = sub.add_parser("budget", help="surplus / normal / tight for the week's quota")
+    sp.add_argument("--refresh", action="store_true", help="skip the 5-minute cache and fetch again")
     sp.set_defaults(func=cmd_budget)
-    sp = sub.add_parser("first", help="フォールバックの並びから、生きている最初の段を返す")
+    sp = sub.add_parser("first", help="first live entry from a fallback chain")
     sp.add_argument("keys", nargs="+")
     sp.set_defaults(func=cmd_first)
-    sp = sub.add_parser("run", help="記録を見てから子を起動し、上限で止まったら記録する（非対話のコマンド用）")
+    sp = sub.add_parser("run", help="launch a child after checking records; record if it stops on a limit (non-interactive commands)")
+    sp.add_argument("--log", help="also write the child's output to this file")
     sp.add_argument("key")
     sp.add_argument("command", nargs=argparse.REMAINDER)
     sp.set_defaults(func=cmd_run)
-    sp = sub.add_parser("scan", help="端末の出力を読み、上限で止まっていたら記録する（TUI セッション用）")
+    sp = sub.add_parser("scan", help="read terminal output and record if it stopped on a limit (TUI sessions)")
     sp.add_argument("key")
     sp.add_argument("--file")
     sp.set_defaults(func=cmd_scan)
