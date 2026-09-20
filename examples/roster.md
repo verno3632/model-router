@@ -41,19 +41,21 @@ Pipeline order: plan → plan review → implement → UI look → UI production
 | Ordinary implementation | Devin × SWE-2 Medium | Medium | promote to SWE-2 High | Claude × Sonnet 5 → Codex × Luna Extra High → Grok 4.6 |
 | Hard implementation | Devin × SWE-2 High / Max | High. Cross-cutting work and migrations: Max | SWE-2 Medium | Claude × Opus 5 → Codex × Sol High → Grok 4.6 |
 | Stuck debugging | Devin × SWE-2 High | High. Max after two failures | — | Claude × Fable 5.1 → Codex × Sol High → Astra High |
-| Mechanical mass production, boilerplate, parallel sweeps (lint, adding tests, scanning) | Devin × SWE-2 Medium, in parallel when there is volume | Medium | — | Claude × Haiku 4.5 (Sonnet 5 if not enough) → Codex × Luna → Grok 4.5 / 4.6 |
+| Mechanical mass production, boilerplate, parallel sweeps (lint, adding unit / integration tests, scanning) | Devin × SWE-2 Medium, in parallel when there is volume | Medium | — | Claude × Haiku 4.5 (Sonnet 5 if not enough) → Codex × Luna → Grok 4.5 / 4.6 |
 | Overnight / asynchronous tickets | Devin × SWE-2 High alone | High | Fusion (Fable Medium + SWE-2) only when the plan is vague | Claude × Sonnet 5 → Codex × Luna Extra High → Grok 4.6 |
 | UI look (screenshots, browser QA, reproducing a reference / mock / existing screen, landing pages, spatial / 3D / motion) | Codex × Astra High | High | Sol High | Claude × Fable 5.1 / Opus 5 (screenshot required) → Grok 4.6 |
+| UI / E2E tests (Playwright etc.): the first spec for a screen or flow — choosing selectors and assertions against the running app — plus triage of flaky or failing runs and approval of snapshot baselines | Codex × Astra High | High | Sol High | Claude × Fable 5.1 / Opus 5 (trace or screenshot required) → Grok 4.6 |
+| UI / E2E tests: further specs that follow an existing one | Devin × SWE-2 High | High | — | Claude × Sonnet 5 → Codex × Luna Extra High |
 | UI: CSS production once the look is fixed | Devin × SWE-2 Medium | Medium | SWE-2 High | Claude × Sonnet 5 → Codex × Luna |
 | Implementation review | Claude Code × Opus 5 (fresh session) | Medium–High | Sonnet 5 | Codex × Sol High → Grok 4.6 |
 
-Pairings for review: UI written by Astra is reviewed by Opus 5; work written by Opus is reviewed by Sol High. SWE-2 never reviews its own work. A ticket that failed twice on SWE-2 goes up to Fable or Sol High.
+Pairings for review: UI written by Astra is reviewed by Opus 5; work written by Opus is reviewed by Sol High. SWE-2 never reviews its own work. E2E specs written by SWE-2 are reviewed for false greens: weakened assertions, fixed sleeps, skipped steps. A ticket that failed twice on SWE-2 goes up to Fable or Sol High.
 
 ## Cheap-tier boundary (SWE-2)
 
-**Send:** implementation with a settled spec, refactoring, type fixes, adding tests, lint, dependency bumps, simple bugs, turning Astra's UI decisions into CSS / components, overnight tickets, parallel mechanical work, bulk API or type replacement, fixtures and mocks, accessibility, responsive layout, unifying logs and config values, migration scripts, documentation upkeep, gathering material for external / web research.
+**Send:** implementation with a settled spec, refactoring, type fixes, adding unit / integration tests, E2E specs that follow an existing spec, lint, dependency bumps, simple bugs, turning Astra's UI decisions into CSS / components, overnight tickets, parallel mechanical work, bulk API or type replacement, fixtures and mocks, accessibility, responsive layout, unifying logs and config values, migration scripts, documentation upkeep, gathering material for external / web research.
 
-**Never send** (not even as a fallback): design and planning, plan review, implementation review, screenshot diffs, browser QA, Figma work, the first draft of a look from a reference, 3D / motion / spatial UI, work where what to build is still undecided, judgement calls on authentication, authorization, billing, DB migration, security boundaries or data integrity.
+**Never send** (not even as a fallback): design and planning, plan review, implementation review, screenshot diffs, browser QA, the first E2E spec for a screen or flow, triage of flaky E2E runs, approval of snapshot baselines, Figma work, the first draft of a look from a reference, 3D / motion / spatial UI, work where what to build is still undecided, judgement calls on authentication, authorization, billing, DB migration, security boundaries or data integrity.
 
 ## Budget
 
