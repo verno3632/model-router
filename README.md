@@ -60,7 +60,7 @@ Until you run `init`, the skill works from the bundled `examples/` — the autho
 
 ## limits.py
 
-Standard library only, Python 3.9+. The parent starts children through `run`. `run` checks the records first and refuses to start a dead tier; if the child ends with limit wording, `run` records it and exits 75. A CLI that is not installed also gives 75, without a record. The parent sees 75 and moves to the next tier.
+Standard library only, Python 3.9+. The parent starts children through `run`. `run` checks the records first and refuses to start a dead tier; if the child exits non-zero and ends with limit wording, `run` records it and exits 75. A child that exits 0 is never recorded, whatever its report says. A CLI that is not installed also gives 75, without a record. The parent sees 75 and moves to the next tier.
 
 ```sh
 L=~/.agents/skills/model-router/limits.py
@@ -74,7 +74,7 @@ python3 $L clear codex:astra
 python3 $L budget                                   # weekly quota: surplus / normal / tight
 ```
 
-A key is `<product>` or `<product>:<model>`. A bare model name works when only one product has it (`opus` → `claude:opus`). A product-level record kills all of that product's models. Records are `{key: expiry in epoch ms}` in `~/.agents/model-router/limits.json`, shared by every session; `MODEL_ROUTER_LIMITS_FILE` overrides the path.
+A key is `<product>` or `<product>:<model>`. A bare model name works when only one product has it (`opus` → `claude:opus`). A product-level record kills all of that product's models. Records are `{key: expiry in epoch ms}` in `~/.agents/model-router/limits.json`, shared by every session; `MODEL_ROUTER_LIMITS_FILE` overrides the path. Every write is also appended to `limits.log.jsonl` beside it — time, pid, cwd, the ancestor processes, the child's command and exit code, the matched line — and `status` prints that origin under each live record.
 
 ### budget
 
@@ -86,8 +86,8 @@ Graded by pace, not by usage: share of the week elapsed minus share used. +25 po
 
 ### Limits of the approach
 
-- Limit detection is a match on wording. Codex's messages are taken from real terminals (`You've hit your usage limit ... try again at Sep 26th, 2026 5:13 PM`), and its advisory lines (`Approaching rate limits`, `less than 5% of your weekly limit left`) are ignored. For other CLIs the patterns are generic (`usage limit`, `rate limit`, `429`, `too many requests`, ...) and unverified. When one is missed, `mark` it and add the wording to `LIMIT_RE`; when an advisory is mistaken for a limit, add it to `ADVISORY_RE`.
-- Only the last 30 lines are examined. A report that legitimately ends with "rate limit" is still recorded by mistake: `clear` it.
+- Limit detection is a match on wording. Codex's messages are taken from real terminals (`You've hit your usage limit ... try again at Sep 26th, 2026 5:13 PM`), and its advisory lines (`Approaching rate limits`, `less than 5% of your weekly limit left`) are ignored. For other CLIs the patterns are generic (`usage limit`, `limit reached`, `rate limited`, `Error: 429`, `too many requests`, ...) and unverified. A bare "rate limit" or "429" is not enough, since reports about code mention both. When one is missed, `mark` it and add the wording to `LIMIT_RE`; when an advisory is mistaken for a limit, add it to `ADVISORY_RE`.
+- Only the last 30 lines are examined. `run` ignores them when the child exits 0, so a CLI that exits 0 on a limit is missed (it warns; `mark` it). `scan` has no exit code: a TUI screen whose last lines quote a limit message is still recorded by mistake. `status` shows where a record came from; `clear` it.
 - A TUI child cannot go through `run`. If the parent forgets to `scan`, nothing is recorded.
 - Reset times are read from `try again in 3 hours 12 minutes`, `try again at [Sep 26th, 2026] 5:13 PM` and `resets at 3pm`. Otherwise the record lasts 5 hours.
 

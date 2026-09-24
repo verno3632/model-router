@@ -3,7 +3,9 @@
 delegating and writes to it when a limit is hit.
 
 State lives in $MODEL_ROUTER_LIMITS_FILE, else $MODEL_ROUTER_HOME/limits.json
-({key: deadline in epoch ms}). HOME_DIR is $MODEL_ROUTER_HOME or
+({key: deadline in epoch ms}). Every write is appended to limits.log.jsonl next
+to it with its origin (pid, cwd, command, matched line, exit code); `status`
+shows the origin of each live record. HOME_DIR is $MODEL_ROUTER_HOME or
 ~/.agents/model-router/. Products and models come from a config file, not this
 file. Parents launch child sessions via `run`: it checks the records first and
 writes one if the child stops on a limit. Standard library only.
@@ -159,6 +161,89 @@ def save(state):
     os.replace(tmp, state_file())
 
 
+def log_file():
+    base = state_file()
+    return (base[:-5] if base.endswith(".json") else base) + ".log.jsonl"
+
+
+LOG_MAX_BYTES, LOG_KEEP = 256_000, 500
+
+
+def ps(*args):
+    import subprocess
+
+    try:
+        return subprocess.run(["ps", *args], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def origin():
+    """Who is writing: this process, its parent's command line, the chain of
+    ancestors (which agent session ran us), and the cwd."""
+    ppid = os.getppid()
+    procs = {}
+    for row in ps("-A", "-o", "pid=,ppid=,comm=").splitlines():
+        parts = row.split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            procs[int(parts[0])] = (int(parts[1]), os.path.basename(parts[2]))
+    chain, pid = [], ppid
+    while pid in procs and pid > 1 and len(chain) < 8:
+        chain.append(f"{procs[pid][1]}[{pid}]")
+        pid = procs[pid][0]
+    try:
+        cwd = os.getcwd()
+    except OSError:  # the worktree was removed under us
+        cwd = None
+    parent = ps("-o", "command=", "-p", str(ppid)).strip()
+    return {"pid": os.getpid(), "ppid": ppid, "ancestors": chain, "parent": parent[:2000], "cwd": cwd}
+
+
+def append_log(entry):
+    """Append one JSON line; keep the newest LOG_KEEP once the file grows. Never fails the caller."""
+    path = log_file()
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        if os.path.getsize(path) > LOG_MAX_BYTES:
+            with open(path, encoding="utf-8") as fh:
+                keep = fh.readlines()[-LOG_KEEP:]
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                fh.writelines(keep)
+            os.replace(tmp, path)
+    except OSError as err:
+        print(f"limits: could not write {path}: {err}", file=sys.stderr)
+
+
+def record(key, until, by, **detail):
+    """Store key's deadline and log where it came from."""
+    state = load()
+    state[key] = until
+    save(state)
+    append_log({"at": int(time.time() * 1000), "key": key, "until": until, "by": by, **origin(), **detail})
+
+
+def origins():
+    """{key: the log entry that wrote its current deadline}."""
+    out = {}
+    try:
+        with open(log_file(), encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(e, dict) and "key" in e:
+                    out.setdefault(e["key"], []).append(e)
+    except OSError:
+        pass
+    state = load()
+    # a record rewritten by an older limits.py has no matching entry
+    return {k: next((e for e in reversed(v) if e.get("until") == state.get(k)), None) for k, v in out.items()}
+
+
 def cooling():
     now = time.time() * 1000
     return {k: v for k, v in load().items() if v > now}
@@ -208,15 +293,20 @@ def dead_until(key, cool, cfg):
 
 # ---------- limit detection ----------
 # Phrases each CLI prints when it stops on a limit. Only the last TAIL_LINES are
-# scanned so words inside a report's body don't false-positive.
+# scanned, and `run` ignores them when the child exits 0, so words inside a
+# report's body don't false-positive. Bare "rate limit" and "429" are too common
+# in reports about code; they count only as an error ("rate limited", "status: 429").
 LIMIT_RE = re.compile(
-    r"usage limit|rate.?limit|limit reached|hit your .{0,20}limit|quota exceeded|too many requests"
-    r"|\b429\b|out of credits|insufficient credits|利用上限|上限に達",
+    r"usage limit|limit reached|limit exceeded|hit your .{0,20}limit|rate.?limited|rate_limit_error"
+    r"|quota exceeded|too many requests|(?:error|status|http|code)\W{0,3}429\b"
+    r"|out of credits|insufficient credits|利用上限|上限に達",
     re.I,
 )
-# Advisories mention limits without being one; their lines are dropped before matching.
+# Advisories and context-window messages mention limits without being a quota;
+# their lines are dropped before matching.
 ADVISORY_RE = re.compile(
-    r"approaching rate.?limits?|rate.?limit reminders|less than \d+% of your .{0,20}limit left",
+    r"approaching rate.?limits?|rate.?limit reminders|less than \d+% of your .{0,20}limit left"
+    r"|context (?:window |length )?limit",
     re.I,
 )
 TAIL_LINES = 30
@@ -271,15 +361,26 @@ def reset_ms(text):
     return None
 
 
-def mark_if_limited(key, lines):
+def find_limit(lines):
+    """(matched phrase, the line holding it, cooldown ms or None), or None."""
     tail = "\n".join(l for l in lines[-TAIL_LINES:] if not ADVISORY_RE.search(l))
     hit = LIMIT_RE.search(tail)
     if not hit:
+        return None
+    start = tail.rfind("\n", 0, hit.start()) + 1
+    end = tail.find("\n", hit.start())
+    line = tail[start:end if end >= 0 else None].strip()
+    return hit.group(0), line[:300], reset_ms(tail)
+
+
+def mark_if_limited(key, lines, by="scan", **detail):
+    found = find_limit(lines)
+    if not found:
         return False
-    state = load()
-    state[key] = int(time.time() * 1000) + (reset_ms(tail) or UNITS["h"] * 5)
-    save(state)
-    print(f"limits: {key} hit a limit (matched {hit.group(0)!r}); recorded until {until_text(state[key])}", file=sys.stderr)
+    match, line, ms = found
+    until = int(time.time() * 1000) + (ms or UNITS["h"] * 5)
+    record(key, until, by, match=match, line=line, **detail)
+    print(f"limits: {key} hit a limit (matched {match!r} in {line!r}); recorded until {until_text(until)}", file=sys.stderr)
     return True
 
 
@@ -303,14 +404,37 @@ def cmd_status(_):
                 + (f". usable: {' '.join(alive)}" if alive else "")
             )
         print(f"{'ok' if ok else 'DEAD'} {product:<7} {why}")
-    # keys not in the table, e.g. recorded as <product>:<unlisted model>
-    known = set(cfg["products"]) | {
-        f"{p}:{m}" for p, s in cfg["products"].items() for m in s["models"]
-    }
-    for key, until in sorted(cool.items(), key=lambda kv: kv[1]):
-        if key not in known:
+    if cool:
+        print("records:")
+        by_key = origins()
+        for key, until in sorted(cool.items(), key=lambda kv: kv[1]):
             print(f"  {key}  until {until_text(until)}")
+            for line in describe_origin(by_key.get(key)):
+                print(f"      {line}")
+        print(f"  (history: {log_file()})")
     return 0
+
+
+def describe_origin(e):
+    """Lines saying who wrote a record, for status."""
+    if e is None:
+        return ["no origin logged (written by an older limits.py or by hand)"]
+    head = f"by {e.get('by')} at {time.strftime('%m-%d %H:%M:%S', time.localtime(e.get('at', 0) / 1000))}"
+    if "exit" in e:
+        head += f", exit {e['exit']}"
+    head += f", pid {e.get('pid')}, cwd {e.get('cwd')}"
+    out = [head]
+    if e.get("command"):
+        out.append("command: " + " ".join(e["command"])[:200])
+    if e.get("source"):
+        out.append(f"read from: {e['source']}")
+    if e.get("line"):
+        out.append(f"matched {e.get('match')!r} in: {e['line']}")
+    if e.get("reason"):
+        out.append(f"reason: {e['reason']}")
+    if e.get("ancestors"):
+        out.append("launched from: " + " < ".join(e["ancestors"]))
+    return out
 
 
 def cmd_mark(args):
@@ -321,10 +445,9 @@ def cmd_mark(args):
     ms = parse_duration(args.duration)
     if ms is None:
         fail(f"bad duration: {args.duration} (30m / 5h / 3d)")
-    state = load()
-    state[key] = int(time.time() * 1000) + ms
-    save(state)
-    print(f"{key}  until {until_text(state[key])}")
+    until = int(time.time() * 1000) + ms
+    record(key, until, "mark", duration=args.duration)
+    print(f"{key}  until {until_text(until)}")
     return 0
 
 
@@ -333,6 +456,7 @@ def cmd_clear(args):
     state = load()
     if state.pop(key, None) is not None:
         save(state)
+        append_log({"at": int(time.time() * 1000), "key": key, "until": None, "by": "clear", **origin()})
     return 0
 
 
@@ -361,7 +485,8 @@ def cmd_scan(args):
             fail(f"cannot read {args.file}: {err.strerror or err}")
     else:
         text = sys.stdin.read()
-    return EXIT_LIMITED if mark_if_limited(key, text.splitlines()) else 0
+    source = args.file or "stdin"
+    return EXIT_LIMITED if mark_if_limited(key, text.splitlines(), "scan", source=source) else 0
 
 
 def cmd_run(args):
@@ -411,7 +536,19 @@ def cmd_run(args):
         t.join()
     if log:
         log.close()
-    return EXIT_LIMITED if mark_if_limited(key, list(tail)) else code
+    if code == 0:
+        # A CLI that stops on a limit exits non-zero; limit words in a clean
+        # run are the child's report talking about limits.
+        found = find_limit(list(tail))
+        if found:
+            print(
+                f"limits: {key} exited 0, so nothing was recorded, though its output mentions {found[0]!r}. "
+                f"If it really stopped on a limit: limits.py mark {key} --for <time until reset>",
+                file=sys.stderr,
+            )
+        return 0
+    limited = mark_if_limited(key, list(tail), "run", command=[c[:200] for c in command], exit=code, log=args.log)
+    return EXIT_LIMITED if limited else code
 
 
 def cmd_where(_):
@@ -597,13 +734,11 @@ def limit_deadline(week, reached, now=None):
     return None
 
 
-def auto_mark(key, until_epoch):
+def auto_mark(key, until_epoch, reason):
     """Copy a limit the API reports into the records. 5h if no deadline is readable."""
-    state = load()
     until_ms = int(until_epoch * 1000) if until_epoch else int(time.time() * 1000) + 5 * UNITS["h"]
-    if state.get(key, 0) < until_ms:
-        state[key] = min(until_ms, int(time.time() * 1000) + MAX_MS)
-        save(state)
+    if load().get(key, 0) < until_ms:
+        record(key, min(until_ms, int(time.time() * 1000) + MAX_MS), "budget", reason=reason)
 
 
 def cmd_budget(args):
@@ -621,7 +756,7 @@ def cmd_budget(args):
         week = info.get("week") or {}
         deadline = limit_deadline(week, info.get("reached"))
         if deadline is not None:
-            auto_mark(product, deadline)
+            auto_mark(product, deadline, f"usage API: week {week.get('used')}% used, limit_reached={bool(info.get('reached'))}")
         if product == "claude":
             five = info.get("five_hour")
             if five is not None:
@@ -633,10 +768,10 @@ def cmd_budget(args):
             m_state, m_text = grade(window)
             print(f"  {model:<9} {m_state}   {m_text}")
             if (window.get("used") or 0) >= 100:
-                auto_mark(f"{product}:{model}", window.get("resets"))
+                auto_mark(f"{product}:{model}", window.get("resets"), f"usage API: {model} week {window.get('used')}% used")
         for model, available_at in (info.get("blocked") or {}).items():
             print(f"  {model:<9} limited   API reports unavailable")
-            auto_mark(f"{product}:{model}", available_at)
+            auto_mark(f"{product}:{model}", available_at, f"usage API: {model} unavailable")
     age = time.time() - data.get("at", 0)
     print(f"(fetched {age:.0f}s ago; --refresh to fetch again)")
     return 0
