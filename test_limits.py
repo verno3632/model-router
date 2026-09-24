@@ -148,7 +148,7 @@ class TestRun(Base):
         self.assertFalse(os.path.exists(marker))
 
     def test_child_limit_recorded(self):
-        code, _, _ = cli("run", "swe", "--", "sh", "-c", "echo 'rate limit reached'")
+        code, _, _ = cli("run", "swe", "--", "sh", "-c", "echo 'rate limit reached'; exit 1")
         self.assertEqual(code, 75)
         self.assertIn("swe", limits.load())
 
@@ -208,6 +208,120 @@ class TestRealLimitWording(Base):
     def test_advisory_plus_limit_is_limit(self):
         lines = ["Approaching rate limits", "You've hit your usage limit. Try again in 3 hours"]
         self.assertTrue(limits.mark_if_limited("grok", lines))
+
+
+class TestFalsePositives(Base):
+    """2026-09-24: working tiers were recorded as limited from a child's report."""
+
+    REVIEW = (
+        "## Review\n"
+        "- retry on HTTP 429 is missing; the client gives up after one rate limit error\n"
+        "- 上限に達したときの待ち時間が固定になっている\n"
+        "- usage limit wording is not localised\n"
+    )
+
+    def test_clean_exit_report_not_recorded(self):
+        # claude:opus was recorded while `claude -p` answered OK
+        code, _, err = cli("run", "claude:opus", "--", "sh", "-c", f"printf '{self.REVIEW}'")
+        self.assertEqual(code, 0)
+        self.assertEqual(limits.load(), {})
+        self.assertIn("exited 0", err)
+        self.assertIn("nothing was recorded", err)
+
+    def test_clean_exit_leaves_tier_startable(self):
+        # swe was recorded 'all limited' and the next run refused to start
+        cli("run", "swe", "--", "sh", "-c", "echo 'Summary: handle 429 Too Many Requests from the API'")
+        code, out, _ = cli("status")
+        self.assertIn("ok swe", out)
+        f = os.path.join(self.home, "child.log")
+        code, _, _ = cli("run", "--log", f, "swe", "--", "sh", "-c", "echo OK")
+        self.assertEqual(code, 0)
+        self.assertTrue(os.path.exists(f))
+
+    def test_failed_exit_with_limit_still_recorded(self):
+        code, _, _ = cli("run", "claude:opus", "--", "sh", "-c", "echo 'Claude AI usage limit reached|1790000000'; exit 1")
+        self.assertEqual(code, 75)
+        self.assertIn("claude:opus", limits.load())
+
+    def test_report_words_not_limits(self):
+        for line in (
+            "limits.py:429: mark_if_limited",
+            "Fixed #429 and the rate limit handling in client.py",
+            "- add a rate-limit backoff",
+            "Context limit reached · /compact or /clear to continue",
+        ):
+            self.assertFalse(limits.mark_if_limited("grok", [line]), line)
+        self.assertEqual(limits.load(), {})
+
+    def test_real_errors_still_detected(self):
+        for line in (
+            "API Error: 429 {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\"}}",
+            "stream error: exceeded retry limit, last status: 429 Too Many Requests",
+            "5-hour limit reached ∙ resets 3am",
+            "You've hit your limit · resets 3am",
+            "Error: rate limit exceeded",
+            "You are being rate limited.",
+        ):
+            self.assertTrue(limits.mark_if_limited("grok", [line]), line)
+
+
+class TestProvenance(Base):
+    def entries(self):
+        with open(limits.log_file(), encoding="utf-8") as fh:
+            return [json.loads(l) for l in fh]
+
+    def test_run_records_origin(self):
+        cli("run", "swe", "--", "sh", "-c", "echo working; echo 'Error: rate limit exceeded'; exit 1")
+        e = self.entries()[-1]
+        self.assertEqual(e["key"], "swe")
+        self.assertEqual(e["by"], "run")
+        self.assertEqual(e["exit"], 1)
+        self.assertEqual(e["command"][:2], ["sh", "-c"])
+        self.assertEqual(e["line"], "Error: rate limit exceeded")
+        self.assertEqual(e["pid"], os.getpid())
+        self.assertEqual(e["cwd"], os.getcwd())
+        self.assertEqual(e["until"], limits.load()["swe"])
+        self.assertIn("at", e)
+
+    def test_status_shows_origin(self):
+        cli("run", "claude:opus", "--", "sh", "-c", "echo 'API Error: 429 Too Many Requests'; exit 1")
+        code, out, _ = cli("status")
+        self.assertEqual(code, 0)
+        self.assertIn("claude:opus", out)
+        self.assertIn("by run", out)
+        self.assertIn("exit 1", out)
+        self.assertIn(os.getcwd(), out)
+        self.assertIn("API Error: 429 Too Many Requests", out)
+        self.assertIn("sh -c", out)
+
+    def test_scan_and_mark_record_origin(self):
+        f = os.path.join(self.home, "screen.txt")
+        with open(f, "w") as fh:
+            fh.write("quota exceeded\n")
+        cli("scan", "grok", "--file", f)
+        cli("mark", "codex:astra", "--for", "1h")
+        by_key = {e["key"]: e for e in self.entries()}
+        self.assertEqual(by_key["grok"]["by"], "scan")
+        self.assertEqual(by_key["grok"]["source"], f)
+        self.assertEqual(by_key["codex:astra"]["by"], "mark")
+        code, out, _ = cli("status")
+        self.assertIn("by scan", out)
+        self.assertIn("by mark", out)
+
+    def test_record_without_origin(self):
+        limits.save({"swe": int(__import__("time").time() * 1000) + 3_600_000})
+        code, out, _ = cli("status")
+        self.assertIn("no origin logged", out)
+
+    def test_clear_logged(self):
+        cli("mark", "swe", "--for", "1h")
+        cli("clear", "swe")
+        self.assertEqual(self.entries()[-1]["by"], "clear")
+
+    def test_log_trimmed(self):
+        for _ in range(limits.LOG_KEEP + 20):
+            limits.append_log({"key": "swe", "by": "mark", "pad": "x" * 2000})
+        self.assertLessEqual(len(self.entries()), limits.LOG_KEEP * 2)
 
 
 class TestResetMs(Base):

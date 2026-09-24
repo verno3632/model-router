@@ -87,9 +87,10 @@ python3 $L clear codex:astra                       # it came back early
 ```
 
 - `run` and `scan` exit **75** when the tier is unavailable: already recorded as limited, limited just now, or its CLI is not installed. **On 75, move to the next key.** Any other exit code from `run` is the child's own.
+- `run` records a limit only when the child exits non-zero. A child that exits 0 is working, even if its report talks about rate limits; `run` then only warns on stderr. If that child's output really was a limit message, `mark` it.
 - `first` exits **1** with no output when every key in the chain is dead. Do not start the work; report to the user which tiers are dead and until when (`status`). It skips keys the config does not know, with a warning.
 - Exit **2** is a usage or configuration error. `run`, `scan`, `mark` and `clear` give it for a key `config.json` does not know; `first` only warns and skips such keys, so read its warnings when it exits 1. Tell the user what to fix; do not guess another key.
 - Order of retreat: the same tool one step down (the roster's "demote" column), then the "fallback" column left to right, skipping dead keys.
 - A product key (`codex`) means the whole product is limited and kills all its models; a model key (`codex:astra`) kills only that model. `--for` takes the time until the reset shown in the error.
-- Records live in `home`, are shared by every session, and expire on their own. They are written only by `run`, `scan`, `mark` and `budget`, so do not start children any other way.
-- `run` and `scan` look at the last 30 lines only. A hit is recorded until the reset time if the output states one, otherwise for 5 hours. If a report legitimately ends with the words "rate limit", the record is wrong: `clear` it.
+- Records live in `home`, are shared by every session, and expire on their own. They are written only by `run`, `scan`, `mark` and `budget`, so do not start children any other way. Each write is logged with its origin; `status` shows who wrote each live record (command, matched line, exit code, cwd, and the session that ran it).
+- `run` and `scan` look at the last 30 lines only. A hit is recorded until the reset time if the output states one, otherwise for 5 hours. A record you doubt: read its origin in `status`, try the tier with a one-line prompt, and `clear` it if it answers.
