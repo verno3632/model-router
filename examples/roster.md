@@ -74,7 +74,7 @@ Even in surplus, implementation, mass production, fact-checking and CSS producti
 
 ## Modes
 
-The active mode is the one word in `<home>/mode` (`home` is printed by `limits.py where`). No file, or `normal`, means the sections above as written. To switch, rewrite that file; state the mode in force in every delegation report.
+The active mode is the one word in `<home>/mode` (`home` is printed by `limits.py where`). No file, or `normal`, means the sections above as written. To switch, rewrite that file (the user's `router-mode` skill does it and notifies running managers); state the mode in force in every delegation report.
 
 | Mode | Every role goes to | Launch | When Astra is dead |
 |---|---|---|---|
@@ -84,7 +84,10 @@ The active mode is the one word in `<home>/mode` (`home` is printed by `limits.p
 
 `ultra` is above `max`: maximum reasoning plus Codex's own automatic delegation to built-in subagents, which this mode allows (the user approved it on 2026-09-26). Fast (`service_tier=fast`) doubles speed and spends more quota. An unsupported tier only prints "not advertised as supported … will be omitted"; if that warning appears, the child is running without Fast — report it.
 
-In `astra-max` and `astra-ultra-fast`, Astra takes every row — planning, fact-checking, research, exploration, implementation, mass production, UI and review. Priority's "Astra for UI only", the Cheap-tier boundary, the Budget table and the Formations below do not apply. This includes direction and supervision: milestone managers run as Codex × Astra sessions with the mode's arguments. Switching into either mode moves work that is already running: a manager on another model writes its handover (Run ID, running children, open questions) to Linear, starts its successor on Astra, confirms the successor is running, and stops. A running child on another product is stopped at a safe point with its work committed to its branch, then restarted on Astra in the same worktree. Children that already reported are not restarted. What still holds: review runs in a fresh Astra session that did not write the work, and X research still needs Grok or the x-research helper.
+In `astra-max` and `astra-ultra-fast`, Astra takes every row — planning, fact-checking, research, exploration, implementation, mass production, UI and review. Priority's "Astra for UI only", the Cheap-tier boundary, the Budget table and the Formations below do not apply. This includes direction and supervision: milestone managers run as Codex × Astra sessions with the mode's arguments. What still holds: review runs in a fresh Astra session that did not write the work, and X research still needs Grok or the x-research helper.
+
+Any switch, including back to `normal`, moves work that is already running onto the new mode's assignment. A manager on a different model writes its handover (Run ID, running children, open questions) to Linear, starts its successor with the new assignment, confirms the successor has read the handover, and stops; if the manager from before the previous switch is still in its terminal and only stopped, hand back to it instead of starting a new one. A running child on a different product is stopped at a safe point with its work committed to its branch, then restarted with the new assignment in the same worktree. Children that already reported are not restarted.
+
 
 ## Formations
 
