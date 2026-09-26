@@ -22,9 +22,10 @@ python3 $L where
 # launcher  <this skill>/launchers/shell.md   (one line per launcher, in order of preference)
 ```
 
-1. Read the `roster` file. It is the only source of truth for models, effort levels, fallbacks and boundaries. This file refers to its sections by heading: **Keys**, **Priority**, **Launchers**, **Roles**, **Cheap-tier boundary**, **Budget**, **Formations**.
-2. Read a launcher doc when you are about to start a child — not before.
-3. If `roster` points into this skill's `examples/` directory, the user has not set up their own: use it, and tell them once that `python3 $L init --minimal` (or `init` for the author's full example) copies editable versions into `home`. If `where` warns that the roster is an unedited copy, it still describes the skill author's subscriptions, not the user's: tell them once, and expect rows naming products they do not have — those fall through as unavailable.
+1. Read the `roster` file. It is the only source of truth for models, effort levels, fallbacks and boundaries. This file refers to its sections by heading: **Keys**, **Priority**, **Launchers**, **Roles**, **Cheap-tier boundary**, **Budget**, **Modes**, **Formations**.
+2. Read the active mode as the roster's **Modes** section says. A mode other than `normal` overrides the rest of the roster to the extent that section states.
+3. Read a launcher doc when you are about to start a child — not before.
+4. If `roster` points into this skill's `examples/` directory, the user has not set up their own: use it, and tell them once that `python3 $L init --minimal` (or `init` for the author's full example) copies editable versions into `home`. If `where` warns that the roster is an unedited copy, it still describes the skill author's subscriptions, not the user's: tell them once, and expect rows naming products they do not have — those fall through as unavailable.
 
 ## Principles
 
@@ -39,6 +40,7 @@ python3 $L where
 
 ## Choosing
 
+0. If a mode other than `normal` is active, it decides the model and effort; skip to step 4 with its key.
 1. Find the row in the roster's **Roles** table that matches the work. Rows are in pipeline order, not a checklist: small work whose brief you can write yourself skips the plan rows, and your brief is the plan. Whoever wrote the brief still does not implement or review it.
 2. Check the roster's **Cheap-tier boundary**: some work never goes to the cheap tier, even as a fallback.
 3. Before planning, reviewing or promoting, check the weekly budget (below) and apply the roster's **Budget** table.

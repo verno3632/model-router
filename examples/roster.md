@@ -72,6 +72,17 @@ Even in surplus, implementation, mass production, fact-checking and CSS producti
 - Codex in surplus: always follow implementation review with a second review by Sol High.
 - Codex tight: send plan review to Claude × Opus 5.5 (fresh session) and keep Astra for UI only.
 
+## Modes
+
+The active mode is the one word in `<home>/mode` (`home` is printed by `limits.py where`). No file, or `normal`, means the sections above as written. To switch, rewrite that file; state the mode in force in every delegation report.
+
+| Mode | Every role goes to | Launch | When Astra is dead |
+|---|---|---|---|
+| `normal` | the Roles table | as the launcher doc | as the Roles table |
+| `astra-max` | Codex × Astra (`codex:astra`), effort `max` | `codex exec -m gpt-6-astra -c model_reasoning_effort=max` | fall back to the Roles table as written, and say so |
+
+In `astra-max`, Astra takes every row — planning, fact-checking, research, exploration, implementation, mass production, UI and review. Priority's "Astra for UI only", the Cheap-tier boundary, the Budget table and the Formations below do not apply. What still holds: review runs in a fresh Astra session that did not write the work, and X research still needs Grok or the x-research helper.
+
 ## Formations
 
 - SWE-2 entirely dead → each row's fallback column.
