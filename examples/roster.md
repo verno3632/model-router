@@ -81,10 +81,25 @@ The active mode is the one word in `<home>/mode` (`home` is printed by `limits.p
 | `normal` | the Roles table | as the launcher doc | as the Roles table |
 | `astra-max` | Codex × Astra (`codex:astra`), effort `max` | `codex exec -m gpt-6-astra -c model_reasoning_effort=max` | fall back to the Roles table as written, and say so |
 | `astra-ultra-fast` | Codex × Astra (`codex:astra`), effort `ultra`, Fast tier | `codex exec -m gpt-6-astra -c model_reasoning_effort=ultra -c service_tier=fast` (TUI: `codex --model gpt-6-astra -c model_reasoning_effort="ultra" -c service_tier="fast"`) | fall back to the Roles table as written, and say so |
+| `codex-first` | the Codex model that fits each role (table below) | `codex exec -m <model> -c model_reasoning_effort=<effort>` (TUI: `codex --model <model> -c model_reasoning_effort="<effort>"`) | that role's row in the Roles table, and say so |
 
 `ultra` is above `max`: maximum reasoning plus Codex's own automatic delegation to built-in subagents, which this mode allows (the user approved it on 2026-09-26). Fast (`service_tier=fast`) doubles speed and spends more quota. An unsupported tier only prints "not advertised as supported … will be omitted"; if that warning appears, the child is running without Fast — report it.
 
 In `astra-max` and `astra-ultra-fast`, Astra takes every row — planning, fact-checking, research, exploration, implementation, mass production, UI and review. Priority's "Astra for UI only", the Cheap-tier boundary, the Budget table and the Formations below do not apply. This includes direction and supervision: milestone managers run as Codex × Astra sessions with the mode's arguments. What still holds: review runs in a fresh Astra session that did not write the work, and X research still needs Grok or the x-research helper.
+
+In `codex-first`, every role goes to Codex, each to the model that fits it. Codex's built-in subagents stay off. Review stays in a fresh session on a different model from the writer's.
+
+| Role (Roles table) | Model | Effort |
+|---|---|---|
+| Direction and supervision, milestone managers | `gpt-5.6-terra` | high |
+| Requirements, design, plan / stuck debugging / hard implementation | `gpt-6-sol` | high (stuck after two failures: max) |
+| Plan review / UI look / first UI or E2E spec / flaky E2E triage | `gpt-6-astra` | high |
+| Implementation review | `gpt-6-sol`; if Sol wrote the work, `gpt-6-astra` | high |
+| Ordinary implementation / overnight tickets / follow-up E2E specs | `gpt-6-luna` | xhigh |
+| Fact-checking / external research / mechanical mass production / CSS production | `gpt-6-luna` | medium |
+| Repository exploration | `gpt-6-luna` | low |
+
+X research still needs Grok or the x-research helper. The Cheap-tier boundary becomes "never to Luna" for the same list of work.
 
 Any switch, including back to `normal`, moves work that is already running onto the new mode's assignment. A manager on a different model writes its handover (Run ID, running children, open questions) to Linear, starts its successor with the new assignment, confirms the successor has read the handover, and stops; if the manager from before the previous switch is still in its terminal and only stopped, hand back to it instead of starting a new one. A running child on a different product is stopped at a safe point with its work committed to its branch, then restarted with the new assignment in the same worktree. Children that already reported are not restarted.
 
