@@ -13,6 +13,10 @@ A worked example: the skill author's subscriptions as of 2026-09. Copy it with `
 
 `claude:opus` は **Opus 5.5**（起動 ID `claude-opus-5-5`）を指す。`claude-opus-5` は別の旧モデルなので渡さない（2026-09-23、ユーザー指定）。
 
+`claude:sonnet` is **Sonnet 5.5** (launch ID `claude-sonnet-5-5`). Launch it with `--model claude-sonnet-5-5` and an explicit `--effort`: Claude Code's default is medium, which silently lowers a High row. Its effort tops out at xHigh — at max it burns far more tokens and scores below xHigh (2026-09-29, user's decision).
+
+`claude:haiku` is Haiku 4.5, retiring no sooner than 2026-10-15. Once Anthropic announces its retirement date, move its rows to Sonnet 5.5 Low.
+
 ## Priority
 
 **Devin → Claude → Codex → Grok.** Every fallback column below is in this order.
@@ -38,21 +42,21 @@ Pipeline order: plan → plan review → implement → UI look → UI production
 | Direction and supervision (splitting, monitoring) | Whoever holds the conversation. On Codex: Terra High | High | — | — |
 | Requirements, design, plan | Claude Code × Fable 5.1 | High / xHigh | Opus 5.5 High | Codex × Sol High → Astra High |
 | Plan review | Codex × Astra High | High | Sol High | Claude × Opus 5.5 (fresh session) |
-| Fact-checking (real code, existing tests, official docs) | Devin × SWE-2 Medium | Medium | — | Claude × Sonnet 5 → Codex × Luna max |
-| External / web research (library comparison, material for a technical choice, official docs, case studies). The conclusion stays with the conversation holder | Devin × SWE-2 Medium. Run Grok 4.6 alongside for anything on X | Medium | SWE-2 High | Claude × Sonnet 5 → Codex × Luna. If Grok is dead, the x-research helper reads X through Codex Computer Use (Sol → Luna, medium effort) on the user's Chrome; skip the X part only when that fails too, and say so |
-| Repository exploration (quick checks mid-conversation) | Claude × Haiku 4.5 subagent | Low | Sonnet 5 | Devin × SWE-2 Medium → Codex × Luna |
-| Ordinary implementation | Devin × SWE-2 Medium | Medium | promote to SWE-2 High | Claude × Sonnet 5 → Codex × Luna Extra High → Grok 4.6 |
+| Fact-checking (real code, existing tests, official docs) | Devin × SWE-2 Medium | Medium | — | Claude × Sonnet 5.5 → Codex × Luna max |
+| External / web research (library comparison, material for a technical choice, official docs, case studies). The conclusion stays with the conversation holder | Devin × SWE-2 Medium. Run Grok 4.6 alongside for anything on X | Medium | SWE-2 High | Claude × Sonnet 5.5 → Codex × Luna. If Grok is dead, the x-research helper reads X through Codex Computer Use (Sol → Luna, medium effort) on the user's Chrome; skip the X part only when that fails too, and say so |
+| Repository exploration (quick checks mid-conversation) | Claude × Haiku 4.5 subagent | Low | Sonnet 5.5 | Devin × SWE-2 Medium → Codex × Luna |
+| Ordinary implementation | Devin × SWE-2 Medium | Medium | promote to SWE-2 High | Claude × Sonnet 5.5 → Codex × Luna Extra High → Grok 4.6 |
 | Hard implementation | Devin × SWE-2 High / Max | High. Cross-cutting work and migrations: Max | SWE-2 Medium | Claude × Opus 5.5 → Codex × Sol High → Grok 4.6 |
 | Stuck debugging | Devin × SWE-2 High | High. Max after two failures | — | Claude × Fable 5.1 → Codex × Sol High → Astra High |
-| Mechanical mass production, boilerplate, parallel sweeps (lint, adding unit / integration tests, scanning) | Devin × SWE-2 Medium, in parallel when there is volume | Medium | — | Claude × Haiku 4.5 (Sonnet 5 if not enough) → Codex × Luna → Grok 4.5 / 4.6 |
-| Overnight / asynchronous tickets | Devin × SWE-2 High alone | High | Fusion (Fable Medium + SWE-2) only when the plan is vague | Claude × Sonnet 5 → Codex × Luna Extra High → Grok 4.6 |
-| UI look (screenshots, browser QA, reproducing a reference / mock / existing screen, landing pages, spatial / 3D / motion) | Codex × Astra High | High | Sol High | Claude × Fable 5.1 / Opus 5.5 (screenshot required) → Grok 4.6 |
+| Mechanical mass production, boilerplate, parallel sweeps (lint, adding unit / integration tests, scanning) | Devin × SWE-2 Medium, in parallel when there is volume | Medium | — | Claude × Sonnet 5.5 Low → Haiku 4.5 → Codex × Luna → Grok 4.5 / 4.6 |
+| Overnight / asynchronous tickets | Devin × SWE-2 High alone | High | Fusion (Fable Medium + SWE-2) only when the plan is vague | Claude × Sonnet 5.5 → Codex × Luna Extra High → Grok 4.6 |
+| UI look (screenshots, browser QA, reproducing a reference / mock / existing screen, landing pages, spatial / 3D / motion) | Codex × Astra High | High | Sol High | Claude × Fable 5.1 / Opus 5.5 → Sonnet 5.5 High (screenshot required) → Grok 4.6 |
 | UI / E2E tests (Playwright etc.): the first spec for a screen or flow — choosing selectors and assertions against the running app — plus triage of flaky or failing runs and approval of snapshot baselines | Codex × Astra High | High | Sol High | Claude × Fable 5.1 / Opus 5.5 (trace or screenshot required) → Grok 4.6 |
-| UI / E2E tests: further specs that follow an existing one | Devin × SWE-2 High | High | — | Claude × Sonnet 5 → Codex × Luna Extra High |
-| UI: CSS production once the look is fixed | Devin × SWE-2 Medium | Medium | SWE-2 High | Claude × Sonnet 5 → Codex × Luna |
-| Implementation review | Claude Code × Opus 5.5 (fresh session) | Medium–High | Sonnet 5 | Codex × Sol High → Grok 4.6 |
+| UI / E2E tests: further specs that follow an existing one | Devin × SWE-2 High | High | — | Claude × Sonnet 5.5 → Codex × Luna Extra High |
+| UI: CSS production once the look is fixed | Devin × SWE-2 Medium | Medium | SWE-2 High | Claude × Sonnet 5.5 → Codex × Luna |
+| Implementation review | Claude Code × Opus 5.5 (fresh session) | Medium–High | Sonnet 5.5 | Codex × Sol High → Grok 4.6 |
 
-Pairings for review: UI written by Astra is reviewed by Opus 5.5; work written by Opus is reviewed by Sol High. SWE-2 never reviews its own work. E2E specs written by SWE-2 are reviewed for false greens: weakened assertions, fixed sleeps, skipped steps. A ticket that failed twice on SWE-2 goes up to Fable or Sol High.
+Pairings for review: UI written by Astra is reviewed by Opus 5.5; work written by Opus or Sonnet 5.5 is reviewed by Sol High. SWE-2 never reviews its own work. E2E specs written by SWE-2 are reviewed for false greens: weakened assertions, fixed sleeps, skipped steps. A ticket that failed twice on SWE-2 goes up to Fable or Sol High.
 
 ## Cheap-tier boundary (SWE-2)
 
@@ -60,16 +64,19 @@ Pairings for review: UI written by Astra is reviewed by Opus 5.5; work written b
 
 **Never send** (not even as a fallback): design and planning, plan review, implementation review, screenshot diffs, browser QA, the first E2E spec for a screen or flow, triage of flaky E2E runs, approval of snapshot baselines, Figma work, the first draft of a look from a reference, 3D / motion / spatial UI, work where what to build is still undecided, judgement calls on authentication, authorization, billing, DB migration, security boundaries or data integrity.
 
+On the Claude side, security judgement goes to Opus 5.5. Sonnet 5.5 hands higher-risk cybersecurity tasks down to Sonnet 5 and says so in its output; when a Sonnet child shows that hand-off, report it as the model that actually ran.
+
 ## Budget
 
 Even in surplus, implementation, mass production, fact-checking and CSS production stay on SWE-2. Astra stays UI-only even when Codex is in surplus. Devin and Grok are not graded.
 
 | Claude is | Design / plan | Promotion from SWE-2 | Stuck debugging | Implementation review | Repository exploration |
 |---|---|---|---|---|---|
-| surplus | Fable xHigh as a matter of course | after 1 failure, to Claude | after SWE-2 High fails once, go to Fable (skip Max) | Opus 5.5 High, fixed | Sonnet 5 |
+| surplus | Fable xHigh as a matter of course | after 1 failure, to Claude | after SWE-2 High fails once, go to Fable (skip Max) | Opus 5.5 High, fixed | Sonnet 5.5 |
 | normal | as the role table | as the role table | as the role table | as the role table | as the role table |
-| tight | Opus 5.5 High | after 2 failures, to Codex × Sol High | fallback tries Sol High first | Sonnet 5; Opus 5.5 for important diffs only | Haiku 4.5 |
+| tight | Opus 5.5 High | after 2 failures, to Codex × Sol High | fallback tries Sol High first | Sonnet 5.5; Opus 5.5 for important diffs only | Haiku 4.5 |
 
+- Claude tight: the Claude step of the Hard implementation fallback is Sonnet 5.5 xHigh; Opus 5.5 only after it fails.
 - Codex in surplus: always follow implementation review with a second review by Sol High.
 - Codex tight: send plan review to Claude × Opus 5.5 (fresh session) and keep Astra for UI only.
 
