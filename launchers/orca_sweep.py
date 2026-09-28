@@ -36,6 +36,25 @@ def is_git_worktree_root(path):
     return bool(top) and os.path.realpath(top) == os.path.realpath(path)
 
 
+def is_linked_worktree(path):
+    """True if `path` is a linked worktree (git-dir differs from common-dir).
+
+    A standalone repo's root shares the main .git dir, so it must never be
+    classified as a removable worktree."""
+    r1 = run(["git", "-C", path, "rev-parse", "--git-dir"])
+    r2 = run(["git", "-C", path, "rev-parse", "--git-common-dir"])
+    if r1.returncode != 0 or r2.returncode != 0:
+        return False
+    d, cd = r1.stdout.strip(), r2.stdout.strip()
+    if not d or not cd:
+        return False
+    if not os.path.isabs(d):
+        d = os.path.join(path, d)
+    if not os.path.isabs(cd):
+        cd = os.path.join(path, cd)
+    return os.path.realpath(d) != os.path.realpath(cd)
+
+
 def base_branch(path):
     """Local `main`, else `master`, else origin/HEAD's target as `origin/<name>`."""
     for name in ("main", "master"):
@@ -62,12 +81,21 @@ def head_branch(path):
     return r.stdout.strip() if r.returncode == 0 else None
 
 
-def porcelain(path, ignored=False):
+def porcelain(path, ignored=False, untracked_all=False, pathspec=None):
     """status --porcelain lines, or None if git status fails."""
     cmd = ["git", "-c", "core.quotePath=false", "-C", path, "status",
-           "--porcelain", "--untracked-files=all", "--ignore-submodules=none"]
+           "--porcelain", "--ignore-submodules=none"]
     if ignored:
+        if untracked_all:
+            cmd.append("--untracked-files=all")
+        else:
+            # -uall would enumerate every file inside ignored dirs; skip that.
+            cmd.append("--untracked-files=normal")
         cmd.append("--ignored")
+    else:
+        cmd.append("--untracked-files=all")
+    if pathspec:
+        cmd += ["--", pathspec]
     r = run(cmd)
     if r.returncode != 0:
         return None
@@ -105,7 +133,11 @@ def is_cache_path(name):
 
 
 def flagged_ignored(path):
-    """Ignored files that are not well-known caches, or None on failure."""
+    """Ignored files that are not well-known caches, or None on failure.
+
+    The status uses -unormal, so ignored dirs come back as `dir/` without
+    their contents. A flagged dir is expanded with a scoped -uall status so
+    a dir holding only caches (e.g. libs/node_modules/) is not flagged."""
     lines = porcelain(path, ignored=True)
     if lines is None:
         return None
@@ -116,6 +148,17 @@ def flagged_ignored(path):
         name = line[3:].strip().strip('"')
         if is_cache_path(name):
             continue
+        if name.endswith("/"):
+            inner = porcelain(path, ignored=True, untracked_all=True,
+                              pathspec=name)
+            if inner is None:
+                return None
+            flagged = [l[3:].strip().strip('"') for l in inner
+                       if l.startswith("!!")
+                       and not is_cache_path(l[3:].strip().strip('"'))]
+            if not flagged:
+                continue
+            name = flagged[0]
         out.append(name)
         if len(out) >= MAX_FLAGGED_IGNORED:
             break
@@ -155,15 +198,26 @@ def classify(wt, cwd, now_ms=None):
     if FOLDER_MARKER in (wt.get("worktreeId") or ""):
         return "folder", {"reason": "folder workspace (::workspace: in worktreeId)"}
 
-    if not os.path.exists(path):
+    if not path or not os.path.isabs(path):
+        return "unknown", {"reason": "path is empty or not absolute"}
+
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
         parent = os.path.dirname(path.rstrip(os.sep)) or os.sep
         if os.path.isdir(parent):
             return "missing", {"reason": "path does not exist; Orca registration only"}
         return "unknown", {"reason": "path and its parent are missing "
-                                     "(unmounted volume or permission error?)"}
+                                     "(unmounted volume?)"}
+    except OSError as e:
+        return "unknown", {"reason": f"cannot stat path ({e}); "
+                                     "permission error?"}
 
     if not is_git_worktree_root(path):
         return "folder", {"reason": "path is not the root of a git worktree"}
+
+    if not is_linked_worktree(path):
+        return "folder", {"reason": "standalone repo root, not a linked worktree"}
 
     if is_self(path, cwd):
         return "self", {"reason": "this sweep is running inside it"}
@@ -257,17 +311,41 @@ def report_table(rows, counts):
     print("\ncounts:", ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
 
 
+def fresh_worktree(worktree_id):
+    """Re-fetch `orca worktree ps --json` and return the entry, or None."""
+    r = run(["orca", "worktree", "ps", "--json"])
+    if r.returncode != 0:
+        return None
+    try:
+        data = json.loads(r.stdout)
+    except json.JSONDecodeError:
+        return None
+    if not data.get("ok"):
+        return None
+    for w in data.get("result", {}).get("worktrees", []):
+        if w.get("worktreeId") == worktree_id:
+            return w
+    return None
+
+
 def perform_removals(removals, wt_by_id, cwd):
     """Run `orca worktree rm` for each row, re-classifying right before.
 
-    Returns (results list, failed count). Entries that no longer classify the
-    same way are skipped, not failed."""
+    The fresh `orca worktree ps` entry is re-classified so a terminal that
+    went live since the first scan is caught. Entries that fail to re-fetch
+    or no longer classify the same way are skipped, not failed.
+    Returns (results list, failed count)."""
     results = []
     failed = 0
     for r in removals:
-        wt = wt_by_id[r["worktreeId"]]
-        klass, detail = classify(wt, cwd)
         entry = {"worktreeId": r["worktreeId"], "path": r["path"]}
+        wt = fresh_worktree(r["worktreeId"])
+        if wt is None:
+            entry.update(ok=None, status="skipped",
+                         reason="could not re-fetch `orca worktree ps` entry")
+            results.append(entry)
+            continue
+        klass, detail = classify(wt, cwd)
         if klass != r["class"]:
             entry.update(ok=None, status="skipped",
                          reason=f"re-classified as {klass}: "

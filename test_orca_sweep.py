@@ -154,7 +154,9 @@ class TestClassify(Base):
     def test_no_base_is_unmerged(self):
         repo2 = os.path.join(self.tmp.name, "repo2")
         init_repo(repo2, branch="trunk")  # no main/master/origin HEAD
-        klass, detail = orca_sweep.classify(wt("r::x", repo2), self.cwd)
+        path = os.path.join(self.tmp.name, "wt2")
+        git(repo2, "worktree", "add", path, "-b", "b")
+        klass, detail = orca_sweep.classify(wt("r::x", path), self.cwd)
         self.assertEqual(klass, "unmerged")
         self.assertIn("no base branch", detail["reason"])
 
@@ -294,6 +296,51 @@ class TestClassify(Base):
         path = self.add_worktree("self-wt", "self-br")
         self.assertTrue(orca_sweep.is_self(path.upper(), path))
 
+    def test_empty_path_is_unknown(self):
+        klass, _ = orca_sweep.classify(wt("r::x", ""), self.cwd)
+        self.assertEqual(klass, "unknown")
+
+    def test_none_path_is_unknown(self):
+        w = wt("r::x", None)
+        w["path"] = None
+        klass, _ = orca_sweep.classify(w, self.cwd)
+        self.assertEqual(klass, "unknown")
+
+    def test_relative_path_is_unknown(self):
+        klass, _ = orca_sweep.classify(wt("r::x", "some/rel/path"), self.cwd)
+        self.assertEqual(klass, "unknown")
+
+    def test_stat_permission_error_is_unknown(self):
+        # unreadable parent: lstat raises PermissionError, not
+        # FileNotFoundError — must not fall into `missing`
+        with mock.patch.object(orca_sweep.os, "lstat",
+                               side_effect=PermissionError("denied")):
+            klass, detail = orca_sweep.classify(
+                wt("r::x", os.path.join(self.tmp.name, "locked")), self.cwd)
+        self.assertEqual(klass, "unknown")
+        self.assertIn("cannot stat path", detail["reason"])
+
+    def test_standalone_repo_root_is_folder(self):
+        # a non-linked repo root (git-dir == git-common-dir) must never be
+        # a removal candidate even when it looks fully merged
+        klass, detail = orca_sweep.classify(wt("r::x", self.repo), self.cwd)
+        self.assertEqual(klass, "folder")
+        self.assertIn("standalone repo root", detail["reason"])
+
+    def test_ignored_status_failure_is_unknown(self):
+        path = self.add_worktree("ign-wt", "ign-br")
+        real = orca_sweep.porcelain
+
+        def fake(p, ignored=False):
+            if ignored:
+                return None
+            return real(p, ignored)
+
+        with mock.patch.object(orca_sweep, "porcelain", fake):
+            klass, detail = orca_sweep.classify(wt("r::" + path, path), self.cwd)
+        self.assertEqual(klass, "unknown")
+        self.assertIn("--ignored", detail["reason"])
+
 
 class TestRemoveCommand(unittest.TestCase):
     def test_argv(self):
@@ -368,13 +415,20 @@ class TestRemovalFlow(Base):
     def setUp(self):
         super().setUp()
         self.orca_calls = []
+        self.ps_worktrees = []
         real_run = orca_sweep.run
 
         def fake(cmd, check=False):
             if cmd and cmd[0] == "orca":
                 self.orca_calls.append(cmd)
                 r = subprocess.CompletedProcess(cmd, 0)
-                r.stdout, r.stderr = json.dumps({"ok": True}), ""
+                if "ps" in cmd:
+                    r.stdout = json.dumps(
+                        {"ok": True,
+                         "result": {"worktrees": self.ps_worktrees}})
+                else:
+                    r.stdout = json.dumps({"ok": True})
+                r.stderr = ""
                 return r
             return real_run(cmd)
         patcher = mock.patch.object(orca_sweep, "run", fake)
@@ -393,6 +447,7 @@ class TestRemovalFlow(Base):
         return code, out.getvalue()
 
     def write_input(self, worktrees):
+        self.ps_worktrees = worktrees
         f = os.path.join(self.tmp.name, "ps.json")
         with open(f, "w") as fh:
             json.dump({"ok": True, "result": {"worktrees": worktrees}}, fh)
@@ -412,13 +467,20 @@ class TestRemovalFlow(Base):
         data = json.loads(out)  # must be pure JSON, no plaintext mixed in
         self.assertEqual(len(data["removals"]), 1)
         self.assertEqual(data["removals"][0]["status"], "removed")
-        self.assertEqual(len(self.orca_calls), 1)
+        self.assertEqual(sum("rm" in c for c in self.orca_calls), 1)
 
     def test_json_remove_failure_exit_code(self):
         real_run = orca_sweep.run
         def fake(cmd, check=False):
             if cmd and cmd[0] == "orca":
                 self.orca_calls.append(cmd)
+                if "ps" in cmd:
+                    r = subprocess.CompletedProcess(cmd, 0)
+                    r.stdout = json.dumps(
+                        {"ok": True,
+                         "result": {"worktrees": self.ps_worktrees}})
+                    r.stderr = ""
+                    return r
                 r = subprocess.CompletedProcess(cmd, 1)
                 r.stdout, r.stderr = "", "boom"
                 return r
@@ -446,8 +508,31 @@ class TestRemovalFlow(Base):
         with mock.patch.object(orca_sweep, "classify", flipping):
             code, out = self.cli("--input", f, "--json", "--remove-landed")
         self.assertEqual(code, 0)
-        self.assertEqual(self.orca_calls, [])
         self.assertEqual(json.loads(out)["removals"][0]["status"], "skipped")
+        self.assertFalse(any("rm" in c for c in self.orca_calls))
+
+    def test_refetch_failure_skips_removal(self):
+        path = self.landed_worktree()
+        f = self.write_input([wt("r::" + path, path)])
+        real_fresh = orca_sweep.fresh_worktree
+        with mock.patch.object(orca_sweep, "fresh_worktree", return_value=None):
+            code, out = self.cli("--input", f, "--json", "--remove-landed")
+        self.assertEqual(code, 0)
+        rem = json.loads(out)["removals"][0]
+        self.assertEqual(rem["status"], "skipped")
+        self.assertFalse(any("rm" in c for c in self.orca_calls))
+
+    def test_refetch_catches_newly_live(self):
+        path = self.landed_worktree()
+        f = self.write_input([wt("r::" + path, path)])
+        # terminal went live between the initial ps and the removal pass
+        self.ps_worktrees = [wt("r::" + path, path, liveTerminalCount=1)]
+        code, out = self.cli("--input", f, "--json", "--remove-landed")
+        self.assertEqual(code, 0)
+        rem = json.loads(out)["removals"][0]
+        self.assertEqual(rem["status"], "skipped")
+        self.assertIn("live", rem["reason"])
+        self.assertFalse(any("rm" in c for c in self.orca_calls))
 
     def test_table_remove_landed(self):
         path = self.landed_worktree()
@@ -455,7 +540,7 @@ class TestRemovalFlow(Base):
         code, out = self.cli("--input", f, "--remove-landed")
         self.assertEqual(code, 0)
         self.assertIn("removed", out)
-        self.assertEqual(len(self.orca_calls), 1)
+        self.assertEqual(sum("rm" in c for c in self.orca_calls), 1)
 
 
 if __name__ == "__main__":
