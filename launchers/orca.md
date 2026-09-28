@@ -50,6 +50,6 @@ orca worktree rm --worktree 'id:<repoId>::<path>' --json
 - Do not pass `--force` to get past uncommitted changes. Look at them first; `--force` is for changes you have decided to discard.
 - A child whose branch was not merged keeps its worktree. Report the branch name instead, as in `shell.md`.
 
-**Sweep.** Before you report a milestone or a batch of delegations as finished, run `orca worktree ps --json` and account for every worktree and tab you created: each one is removed, or kept with its reason written in the issue.
+**Sweep.** Before you report a milestone or a batch of delegations as finished, run `orca worktree ps --json` and account for every worktree and tab you created: each one is removed, or kept with its reason written in the issue. `python3 <this skill>/launchers/orca_sweep.py` lists that classification in one table, and `--remove-landed` removes only the ones safe to delete.
 
 If the Orca runtime is unreachable (`orca status`), move to the next launcher `where` lists — or to whatever the roster names for that case — and report that you fell back.
