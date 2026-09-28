@@ -13,7 +13,7 @@ A worked example: the skill author's subscriptions as of 2026-09. Copy it with `
 
 `claude:opus` は **Opus 5.5**（起動 ID `claude-opus-5-5`）を指す。`claude-opus-5` は別の旧モデルなので渡さない（2026-09-23、ユーザー指定）。
 
-`claude:sonnet` is **Sonnet 5.5** (launch ID `claude-sonnet-5-5`). Launch it with `--model claude-sonnet-5-5` and an explicit `--effort`: Claude Code's default is medium, which silently lowers a High row. Its effort tops out at xHigh — at max it burns far more tokens and scores below xHigh (2026-09-29, user's decision).
+`claude:sonnet` is **Sonnet 5.5** (launch ID `claude-sonnet-5-5`). Launch it with `--model claude-sonnet-5-5` and an explicit `--effort`: Claude Code's default is medium, which silently lowers a High row. Cap its effort at xHigh: at max it burns far more tokens and scores below xHigh (2026-09-29, user's decision).
 
 `claude:haiku` is Haiku 4.5, retiring no sooner than 2026-10-15. Once Anthropic announces its retirement date, move its rows to Sonnet 5.5 Low.
 
@@ -50,13 +50,13 @@ Pipeline order: plan → plan review → implement → UI look → UI production
 | Stuck debugging | Devin × SWE-2 High | High. Max after two failures | — | Claude × Fable 5.1 → Codex × Sol High → Astra High |
 | Mechanical mass production, boilerplate, parallel sweeps (lint, adding unit / integration tests, scanning) | Devin × SWE-2 Medium, in parallel when there is volume | Medium | — | Claude × Sonnet 5.5 Low → Haiku 4.5 → Codex × Luna → Grok 4.5 / 4.6 |
 | Overnight / asynchronous tickets | Devin × SWE-2 High alone | High | Fusion (Fable Medium + SWE-2) only when the plan is vague | Claude × Sonnet 5.5 → Codex × Luna Extra High → Grok 4.6 |
-| UI look (screenshots, browser QA, reproducing a reference / mock / existing screen, landing pages, spatial / 3D / motion) | Codex × Astra High | High | Sol High | Claude × Fable 5.1 / Opus 5.5 → Sonnet 5.5 High (screenshot required) → Grok 4.6 |
+| UI look (screenshots, browser QA, reproducing a reference / mock / existing screen, landing pages, spatial / 3D / motion) | Codex × Astra High | High | Sol High | Claude × Fable 5.1 / Opus 5.5 → Sonnet 5.5 High, each with a screenshot → Grok 4.6 |
 | UI / E2E tests (Playwright etc.): the first spec for a screen or flow — choosing selectors and assertions against the running app — plus triage of flaky or failing runs and approval of snapshot baselines | Codex × Astra High | High | Sol High | Claude × Fable 5.1 / Opus 5.5 (trace or screenshot required) → Grok 4.6 |
 | UI / E2E tests: further specs that follow an existing one | Devin × SWE-2 High | High | — | Claude × Sonnet 5.5 → Codex × Luna Extra High |
 | UI: CSS production once the look is fixed | Devin × SWE-2 Medium | Medium | SWE-2 High | Claude × Sonnet 5.5 → Codex × Luna |
 | Implementation review | Claude Code × Opus 5.5 (fresh session) | Medium–High | Sonnet 5.5 | Codex × Sol High → Grok 4.6 |
 
-Pairings for review: UI written by Astra is reviewed by Opus 5.5; work written by Opus or Sonnet 5.5 is reviewed by Sol High. SWE-2 never reviews its own work. E2E specs written by SWE-2 are reviewed for false greens: weakened assertions, fixed sleeps, skipped steps. A ticket that failed twice on SWE-2 goes up to Fable or Sol High.
+Pairings for review override the Implementation review row's first choice: UI written by Astra is reviewed by Opus 5.5; work written by Opus or Sonnet 5.5 is reviewed by Sol High. SWE-2 never reviews its own work. E2E specs written by SWE-2 are reviewed for false greens: weakened assertions, fixed sleeps, skipped steps. A ticket that failed twice on SWE-2 goes up to Fable or Sol High.
 
 ## Cheap-tier boundary (SWE-2)
 
