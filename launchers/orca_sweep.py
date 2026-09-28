@@ -2,9 +2,9 @@
 """Classify Orca worktrees so a manager can sweep finished children.
 
 Reads `orca worktree ps --json` (or a file via --input) and classifies each
-non-main worktree: folder, missing, self, live, dirty, unmerged, landed,
-landed-with-ignored. Dry-run by default; --remove-landed / --remove-missing
-delete via `orca worktree rm`. Python 3.9+, stdlib only.
+non-main worktree: folder, missing, self, live, dirty, unmerged, protected,
+unknown, landed, landed-with-ignored. Dry-run by default; --remove-landed /
+--remove-missing delete via `orca worktree rm`. Python 3.9+, stdlib only.
 """
 import argparse
 import json
@@ -15,11 +15,11 @@ import time
 
 FOLDER_MARKER = "::workspace:"
 
-# Ignored-path fragments that are ordinary caches, not worth flagging.
-CACHE_IGNORED = (
-    "node_modules", ".venv", "venv/", "__pycache__", ".pytest_cache",
-    ".mypy_cache", ".ruff_cache", ".DS_Store", ".godot/", ".egg-info",
-)
+# Ignored-path components that are ordinary caches, not worth flagging.
+CACHE_COMPONENTS = frozenset({
+    "node_modules", ".venv", "venv", "__pycache__", ".pytest_cache",
+    ".mypy_cache", ".ruff_cache", ".DS_Store", ".godot",
+})
 MAX_FLAGGED_IGNORED = 5
 
 
@@ -27,33 +27,60 @@ def run(cmd, check=False):
     return subprocess.run(cmd, capture_output=True, text=True, check=check)
 
 
-def is_git_repo(path):
-    return run(["git", "-C", path, "rev-parse", "--git-dir"]).returncode == 0
+def is_git_worktree_root(path):
+    """True only if `path` itself is the root of a git working tree."""
+    r = run(["git", "-C", path, "rev-parse", "--show-toplevel"])
+    if r.returncode != 0:
+        return False
+    top = r.stdout.strip()
+    return bool(top) and os.path.realpath(top) == os.path.realpath(path)
 
 
 def base_branch(path):
-    """Local `main`, else `master`, else origin/HEAD's target; None if none."""
+    """Local `main`, else `master`, else origin/HEAD's target as `origin/<name>`."""
     for name in ("main", "master"):
         if run(["git", "-C", path, "rev-parse", "--verify", "--quiet", name]).returncode == 0:
             return name
     r = run(["git", "-C", path, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"])
     if r.returncode == 0:
         ref = r.stdout.strip()  # refs/remotes/origin/<name>
-        return ref.rsplit("/", 1)[-1]
+        if ref.startswith("refs/remotes/"):
+            return ref[len("refs/remotes/"):]
     return None
 
 
+def base_branch_name(base):
+    """The branch-name part of a base ref (`origin/rel/2.0` -> `rel/2.0`)."""
+    if base.startswith("origin/"):
+        return base[len("origin/"):]
+    return base
+
+
+def head_branch(path):
+    """Checked-out branch name, or None for detached/unborn HEAD."""
+    r = run(["git", "-C", path, "symbolic-ref", "--quiet", "--short", "HEAD"])
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
 def porcelain(path, ignored=False):
-    cmd = ["git", "-C", path, "status", "--porcelain"]
+    """status --porcelain lines, or None if git status fails."""
+    cmd = ["git", "-c", "core.quotePath=false", "-C", path, "status",
+           "--porcelain", "--untracked-files=all", "--ignore-submodules=none"]
     if ignored:
         cmd.append("--ignored")
     r = run(cmd)
-    return r.stdout.splitlines() if r.returncode == 0 else []
+    if r.returncode != 0:
+        return None
+    return r.stdout.splitlines()
 
 
 def dirty_counts(path):
+    """(tracked, untracked) change counts, or None if status fails."""
+    lines = porcelain(path)
+    if lines is None:
+        return None
     tracked = untracked = 0
-    for line in porcelain(path):
+    for line in lines:
         if line.startswith("??"):
             untracked += 1
         else:
@@ -69,14 +96,25 @@ def unmerged_commits(path, base):
     return sum(1 for line in r.stdout.splitlines() if line.startswith("+"))
 
 
+def is_cache_path(name):
+    """True if any path component is a well-known cache name."""
+    for comp in name.strip("/").split("/"):
+        if comp in CACHE_COMPONENTS or comp.endswith(".egg-info"):
+            return True
+    return False
+
+
 def flagged_ignored(path):
-    """Ignored files that are not well-known caches (saves, builds, DBs)."""
+    """Ignored files that are not well-known caches, or None on failure."""
+    lines = porcelain(path, ignored=True)
+    if lines is None:
+        return None
     out = []
-    for line in porcelain(path, ignored=True):
+    for line in lines:
         if not line.startswith("!!"):
             continue
-        name = line[3:].strip()
-        if any(part in name for part in CACHE_IGNORED):
+        name = line[3:].strip().strip('"')
+        if is_cache_path(name):
             continue
         out.append(name)
         if len(out) >= MAX_FLAGGED_IGNORED:
@@ -102,9 +140,9 @@ def human_ms(ms):
 
 
 def is_self(path, cwd):
-    """True if path is cwd or an ancestor of it."""
-    path = os.path.realpath(path)
-    cwd = os.path.realpath(cwd)
+    """True if path is cwd or an ancestor of it (case-insensitive)."""
+    path = os.path.realpath(path).lower()
+    cwd = os.path.realpath(cwd).lower()
     return cwd == path or cwd.startswith(path + os.sep)
 
 
@@ -118,15 +156,21 @@ def classify(wt, cwd, now_ms=None):
         return "folder", {"reason": "folder workspace (::workspace: in worktreeId)"}
 
     if not os.path.exists(path):
-        return "missing", {"reason": "path does not exist; Orca registration only"}
+        parent = os.path.dirname(path.rstrip(os.sep)) or os.sep
+        if os.path.isdir(parent):
+            return "missing", {"reason": "path does not exist; Orca registration only"}
+        return "unknown", {"reason": "path and its parent are missing "
+                                     "(unmounted volume or permission error?)"}
 
-    if not is_git_repo(path):
-        return "folder", {"reason": "path is not a git repository"}
+    if not is_git_worktree_root(path):
+        return "folder", {"reason": "path is not the root of a git worktree"}
 
     if is_self(path, cwd):
         return "self", {"reason": "this sweep is running inside it"}
 
-    live = wt.get("liveTerminalCount") or 0
+    live = wt.get("liveTerminalCount")
+    if live is None:
+        return "unknown", {"reason": "liveTerminalCount missing from `orca worktree ps` entry"}
     if live > 0:
         states = [a.get("state", "?") for a in wt.get("agents") or []]
         return "live", {
@@ -135,13 +179,22 @@ def classify(wt, cwd, now_ms=None):
             "lastOutputAge": human_ms(age_ms(wt.get("lastOutputAt"), now_ms)),
         }
 
-    tracked, untracked = dirty_counts(path)
+    counts = dirty_counts(path)
+    if counts is None:
+        return "unknown", {"reason": "git status failed; cannot verify clean state"}
+    tracked, untracked = counts
     if tracked + untracked > 0:
         return "dirty", {"trackedChanges": tracked, "untrackedFiles": untracked}
 
     base = base_branch(path)
     if base is None:
         return "unmerged", {"reason": "no base branch (main/master/origin HEAD) found"}
+
+    head = head_branch(path)
+    if head is not None and head == base_branch_name(base):
+        return "protected", {"base": base, "branch": head,
+                             "reason": "HEAD is the base branch itself"}
+
     n = unmerged_commits(path, base)
     if n is None:
         return "unmerged", {"base": base, "reason": "git cherry failed"}
@@ -149,16 +202,29 @@ def classify(wt, cwd, now_ms=None):
         return "unmerged", {"base": base, "commits": n}
 
     flagged = flagged_ignored(path)
-    klass = "landed-with-ignored" if flagged else "landed"
+    if flagged is None:
+        return "unknown", {"reason": "git status --ignored failed"}
     detail = {"base": base}
     if flagged:
         detail["ignoredFiles"] = flagged
-    return klass, detail
+        return "landed-with-ignored", detail
+    return "landed", detail
 
 
 def remove_command(wt):
     """The `orca worktree rm` invocation for a worktree (never --force)."""
     return ["orca", "worktree", "rm", "--worktree", f"id:{wt['worktreeId']}", "--json"]
+
+
+def select_removals(rows, remove_landed=False, remove_missing=False):
+    """Rows eligible for deletion. Only `landed` / `missing` ever qualify."""
+    out = []
+    for r in rows:
+        if r["class"] == "landed" and remove_landed:
+            out.append(r)
+        elif r["class"] == "missing" and remove_missing:
+            out.append(r)
+    return out
 
 
 def load_worktrees(args):
@@ -177,7 +243,7 @@ def load_worktrees(args):
 
 def report_table(rows, counts):
     for klass in ("folder", "missing", "self", "live", "dirty", "unmerged",
-                  "landed-with-ignored", "landed", "main"):
+                  "protected", "unknown", "landed-with-ignored", "landed", "main"):
         group = [r for r in rows if r["class"] == klass]
         if not group:
             continue
@@ -189,6 +255,36 @@ def report_table(rows, counts):
                 bits = "; ".join(f"{k}={v}" for k, v in detail.items())
                 print(f"      {bits}")
     print("\ncounts:", ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
+
+
+def perform_removals(removals, wt_by_id, cwd):
+    """Run `orca worktree rm` for each row, re-classifying right before.
+
+    Returns (results list, failed count). Entries that no longer classify the
+    same way are skipped, not failed."""
+    results = []
+    failed = 0
+    for r in removals:
+        wt = wt_by_id[r["worktreeId"]]
+        klass, detail = classify(wt, cwd)
+        entry = {"worktreeId": r["worktreeId"], "path": r["path"]}
+        if klass != r["class"]:
+            entry.update(ok=None, status="skipped",
+                         reason=f"re-classified as {klass}: "
+                                f"{detail.get('reason', detail)}")
+            results.append(entry)
+            continue
+        res = run(remove_command(wt))
+        try:
+            ok = res.returncode == 0 and json.loads(res.stdout).get("ok")
+        except json.JSONDecodeError:
+            ok = False
+        entry.update(ok=ok, status="removed" if ok else "failed",
+                     output=(res.stdout.strip() or res.stderr.strip()))
+        if not ok:
+            failed += 1
+        results.append(entry)
+    return results, failed
 
 
 def main():
@@ -203,44 +299,35 @@ def main():
 
     cwd = os.getcwd()
     rows = []
+    wt_by_id = {}
     for wt in load_worktrees(args):
+        row = {"worktreeId": wt.get("worktreeId"), "repo": wt.get("repo"),
+               "path": wt.get("path"), "detail": {}}
         if wt.get("isMainWorktree"):
-            rows.append({"class": "main", "worktreeId": wt.get("worktreeId"),
-                         "repo": wt.get("repo"), "path": wt.get("path"), "detail": {}})
-            continue
-        klass, detail = classify(wt, cwd)
-        rows.append({"class": klass, "worktreeId": wt.get("worktreeId"),
-                     "repo": wt.get("repo"), "path": wt.get("path"), "detail": detail})
+            row["class"] = "main"
+        else:
+            row["class"], row["detail"] = classify(wt, cwd)
+            wt_by_id[row["worktreeId"]] = wt
+        rows.append(row)
 
     counts = {}
     for r in rows:
         counts[r["class"]] = counts.get(r["class"], 0) + 1
 
-    removals = []
-    if args.remove_landed:
-        removals += [r for r in rows if r["class"] == "landed"]
-    if args.remove_missing:
-        removals += [r for r in rows if r["class"] == "missing"]
+    removals = select_removals(rows, args.remove_landed, args.remove_missing)
+    results, failed = perform_removals(removals, wt_by_id, cwd) if removals else ([], 0)
 
     if args.json:
         out = {"counts": counts, "worktrees": rows}
-        if removals:
-            out["removals"] = []
+        if args.remove_landed or args.remove_missing:
+            out["removals"] = results
         print(json.dumps(out, indent=2))
     else:
         report_table(rows, counts)
+        for e in results:
+            print(f"{e['status']:<8} {e['path']}  {e.get('output') or e.get('reason', '')}")
 
-    for r in removals:
-        cmd = remove_command({"worktreeId": r["worktreeId"]})
-        res = run(cmd)
-        try:
-            ok = res.returncode == 0 and json.loads(res.stdout).get("ok")
-        except json.JSONDecodeError:
-            ok = False
-        msg = res.stdout.strip() or res.stderr.strip()
-        print(f"{'removed' if ok else 'FAILED '} {r['path']}  {msg}")
-
-    return 0
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

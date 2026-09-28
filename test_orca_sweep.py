@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "launchers"))
 import orca_sweep
@@ -74,7 +75,7 @@ class TestClassify(Base):
         os.makedirs(path)
         klass, detail = orca_sweep.classify(wt("r::" + path, path), self.cwd)
         self.assertEqual(klass, "folder")
-        self.assertIn("not a git repository", detail["reason"])
+        self.assertIn("not the root of a git worktree", detail["reason"])
 
     def test_missing(self):
         klass, detail = orca_sweep.classify(
@@ -166,6 +167,133 @@ class TestClassify(Base):
         self.assertEqual(klass, "landed")
         self.assertEqual(detail["base"], "master")
 
+    def test_protected_head_is_base(self):
+        # worktree checked out on `main` itself: cherry vs main is always empty
+        path = os.path.join(self.tmp.name, "main-wt")
+        git(self.repo, "worktree", "add", "-f", path, "main")
+        commit_file(path, "wip.txt", "unpushed work")
+        klass, detail = orca_sweep.classify(wt("r::" + path, path), self.cwd)
+        self.assertEqual(klass, "protected")
+        self.assertEqual(detail["branch"], "main")
+
+    def test_folder_repo_subdirectory(self):
+        # a plain dir inside a repo resolves to the parent repo — still folder
+        sub = os.path.join(self.repo, "data")
+        os.makedirs(sub)
+        klass, detail = orca_sweep.classify(wt("r::" + sub, sub), self.cwd)
+        self.assertEqual(klass, "folder")
+
+    def test_status_failure_is_unknown(self):
+        path = self.add_worktree("broken-wt", "broken-br")
+        gitdir = git(path, "rev-parse", "--absolute-git-dir").strip()
+        with open(os.path.join(gitdir, "index"), "w") as fh:
+            fh.write("garbage")
+        klass, detail = orca_sweep.classify(wt("r::" + path, path), self.cwd)
+        self.assertEqual(klass, "unknown")
+        self.assertIn("git status", detail["reason"])
+
+    def test_untracked_despite_config(self):
+        # status.showUntrackedFiles=no must not hide untracked work
+        git(self.repo, "config", "status.showUntrackedFiles", "no")
+        path = self.add_worktree("conf-wt", "conf-br")
+        with open(os.path.join(path, "new-work.py"), "w") as fh:
+            fh.write("x")
+        klass, detail = orca_sweep.classify(wt("r::" + path, path), self.cwd)
+        self.assertEqual(klass, "dirty")
+        self.assertEqual(detail["untrackedFiles"], 1)
+
+    def test_submodule_change_despite_ignore(self):
+        # .gitmodules ignore=all must not hide submodule-local commits
+        sub = os.path.join(self.tmp.name, "sub")
+        init_repo(sub)
+        git(self.repo, "-c", "protocol.file.allow=always",
+            "submodule", "add", sub, "sub")
+        git(self.repo, "config", "-f", ".gitmodules", "submodule.sub.ignore", "all")
+        git(self.repo, "add", ".gitmodules")
+        git(self.repo, "commit", "-m", "sub")
+        path = self.add_worktree("submod-wt", "submod-br")
+        subprocess.run(["git", "-C", path, "-c", "protocol.file.allow=always",
+                        "submodule", "update", "--init"],
+                       capture_output=True, check=True)
+        git(os.path.join(path, "sub"), "commit", "--allow-empty", "-m", "local")
+        klass, _ = orca_sweep.classify(wt("r::" + path, path), self.cwd)
+        self.assertEqual(klass, "dirty")
+
+    def test_missing_parent_absent_is_unknown(self):
+        gone = os.path.join(self.tmp.name, "vol", "wt")  # vol/ doesn't exist
+        klass, detail = orca_sweep.classify(wt("r::gone", gone), self.cwd)
+        self.assertEqual(klass, "unknown")
+
+    def test_live_count_missing_key_is_unknown(self):
+        path = self.add_worktree("nolc-wt", "nolc-br")
+        w = wt("r::" + path, path)
+        del w["liveTerminalCount"]
+        klass, detail = orca_sweep.classify(w, self.cwd)
+        self.assertEqual(klass, "unknown")
+
+    def test_live_no_last_output(self):
+        path = self.add_worktree("live-wt", "live-br")
+        klass, detail = orca_sweep.classify(wt(
+            "r::" + path, path, liveTerminalCount=1, lastOutputAt=None), self.cwd)
+        self.assertEqual(klass, "live")
+        self.assertEqual(detail["lastOutputAge"], "no output recorded")
+
+    def test_base_origin_head_fallback(self):
+        # no local main/master: base is the remote-tracking ref itself
+        src = os.path.join(self.tmp.name, "src")
+        init_repo(src, branch="rel/2.0")
+        repo2 = os.path.join(self.tmp.name, "repo2")
+        init_repo(repo2, branch="zz")
+        git(repo2, "remote", "add", "origin", src)
+        git(repo2, "fetch", "origin")
+        git(repo2, "symbolic-ref", "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/rel/2.0")
+        path = os.path.join(self.tmp.name, "wt2")
+        git(repo2, "worktree", "add", path, "-b", "done-br", "origin/rel/2.0")
+        klass, detail = orca_sweep.classify(wt("r::" + path, path), self.cwd)
+        self.assertEqual(klass, "landed")
+        self.assertEqual(detail["base"], "origin/rel/2.0")
+
+    def test_cherry_failure_returns_none(self):
+        path = self.add_worktree("cf-wt", "cf-br")
+        self.assertIsNone(orca_sweep.unmerged_commits(path, "nonexistent-ref"))
+
+    def test_classify_cherry_failure_is_unmerged(self):
+        path = self.add_worktree("cf-wt", "cf-br")
+        with mock.patch.object(orca_sweep, "unmerged_commits", return_value=None):
+            klass, detail = orca_sweep.classify(wt("r::" + path, path), self.cwd)
+        self.assertEqual(klass, "unmerged")
+        self.assertIn("cherry", detail["reason"])
+
+    def test_ignored_cache_component_match(self):
+        commit_file(self.repo, ".gitignore",
+                    "*.sav\nmyvenv/\nnode_modules/\nsub_cache.egg-info/\n")
+        path = self.add_worktree("ign-wt", "ign-br")
+        for rel in ("keep.sav", "myvenv/x.py", "saves/node_modules_old.sav",
+                    "libs/node_modules/mod.js", "sub_cache.egg-info/P"):
+            p = os.path.join(path, rel)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "w") as fh:
+                fh.write("x")
+        klass, detail = orca_sweep.classify(wt("r::" + path, path), self.cwd)
+        self.assertEqual(klass, "landed-with-ignored")
+        self.assertEqual(sorted(detail["ignoredFiles"]),
+                         ["keep.sav", "myvenv/x.py",
+                          "saves/node_modules_old.sav"])
+
+    def test_ignored_japanese_name_unescaped(self):
+        commit_file(self.repo, ".gitignore", "*.sav\n")
+        path = self.add_worktree("ign-wt", "ign-br")
+        with open(os.path.join(path, "セーブ データ.sav"), "w") as fh:
+            fh.write("x")
+        klass, detail = orca_sweep.classify(wt("r::" + path, path), self.cwd)
+        self.assertEqual(klass, "landed-with-ignored")
+        self.assertEqual(detail["ignoredFiles"], ["セーブ データ.sav"])
+
+    def test_is_self_case_insensitive(self):
+        path = self.add_worktree("self-wt", "self-br")
+        self.assertTrue(orca_sweep.is_self(path.upper(), path))
+
 
 class TestRemoveCommand(unittest.TestCase):
     def test_argv(self):
@@ -211,6 +339,123 @@ class TestMain(Base):
         self.assertEqual(code, 0)
         self.assertIn("missing", out)
         self.assertIn("counts:", out)
+
+
+class TestSelectRemovals(unittest.TestCase):
+    def rows(self, *classes):
+        return [{"class": c, "worktreeId": f"id{i}", "path": f"/p{i}",
+                 "repo": "r", "detail": {}} for i, c in enumerate(classes)]
+
+    def test_only_landed_and_missing_selected(self):
+        classes = ["folder", "missing", "self", "live", "dirty", "unmerged",
+                   "protected", "unknown", "landed-with-ignored", "landed",
+                   "main"]
+        rows = self.rows(*classes)
+        sel = orca_sweep.select_removals(rows, remove_landed=True,
+                                       remove_missing=True)
+        self.assertEqual([r["class"] for r in sel], ["missing", "landed"])
+
+    def test_flags_gate_selection(self):
+        rows = self.rows("missing", "landed")
+        self.assertEqual(orca_sweep.select_removals(rows), [])
+        self.assertEqual(len(orca_sweep.select_removals(
+            rows, remove_landed=True)), 1)
+        self.assertEqual(len(orca_sweep.select_removals(
+            rows, remove_missing=True)), 1)
+
+
+class TestRemovalFlow(Base):
+    def setUp(self):
+        super().setUp()
+        self.orca_calls = []
+        real_run = orca_sweep.run
+
+        def fake(cmd, check=False):
+            if cmd and cmd[0] == "orca":
+                self.orca_calls.append(cmd)
+                r = subprocess.CompletedProcess(cmd, 0)
+                r.stdout, r.stderr = json.dumps({"ok": True}), ""
+                return r
+            return real_run(cmd)
+        patcher = mock.patch.object(orca_sweep, "run", fake)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def cli(self, *argv):
+        old = sys.argv
+        sys.argv = ["orca_sweep.py", *argv]
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out):
+                code = orca_sweep.main()
+        finally:
+            sys.argv = old
+        return code, out.getvalue()
+
+    def write_input(self, worktrees):
+        f = os.path.join(self.tmp.name, "ps.json")
+        with open(f, "w") as fh:
+            json.dump({"ok": True, "result": {"worktrees": worktrees}}, fh)
+        return f
+
+    def landed_worktree(self):
+        path = self.add_worktree("done-wt", "done-br")
+        commit_file(path, "feat.txt", "f")
+        git(self.repo, "merge", "done-br")
+        return path
+
+    def test_json_remove_landed(self):
+        path = self.landed_worktree()
+        f = self.write_input([wt("r::" + path, path)])
+        code, out = self.cli("--input", f, "--json", "--remove-landed")
+        self.assertEqual(code, 0)
+        data = json.loads(out)  # must be pure JSON, no plaintext mixed in
+        self.assertEqual(len(data["removals"]), 1)
+        self.assertEqual(data["removals"][0]["status"], "removed")
+        self.assertEqual(len(self.orca_calls), 1)
+
+    def test_json_remove_failure_exit_code(self):
+        real_run = orca_sweep.run
+        def fake(cmd, check=False):
+            if cmd and cmd[0] == "orca":
+                self.orca_calls.append(cmd)
+                r = subprocess.CompletedProcess(cmd, 1)
+                r.stdout, r.stderr = "", "boom"
+                return r
+            return real_run(cmd)
+        path = self.landed_worktree()
+        f = self.write_input([wt("r::" + path, path)])
+        with mock.patch.object(orca_sweep, "run", fake):
+            code, out = self.cli("--input", f, "--json", "--remove-landed")
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(out)["removals"][0]["status"], "failed")
+
+    def test_reclassify_skips_newly_dirty(self):
+        path = self.landed_worktree()
+        f = self.write_input([wt("r::" + path, path)])
+        real_classify = orca_sweep.classify
+        calls = {"n": 0}
+
+        def flipping(w, cwd, now_ms=None):
+            calls["n"] += 1
+            if calls["n"] == 2:  # the re-check before removal
+                with open(os.path.join(path, "dirty.txt"), "w") as fh:
+                    fh.write("x")
+            return real_classify(w, cwd, now_ms)
+
+        with mock.patch.object(orca_sweep, "classify", flipping):
+            code, out = self.cli("--input", f, "--json", "--remove-landed")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.orca_calls, [])
+        self.assertEqual(json.loads(out)["removals"][0]["status"], "skipped")
+
+    def test_table_remove_landed(self):
+        path = self.landed_worktree()
+        f = self.write_input([wt("r::" + path, path)])
+        code, out = self.cli("--input", f, "--remove-landed")
+        self.assertEqual(code, 0)
+        self.assertIn("removed", out)
+        self.assertEqual(len(self.orca_calls), 1)
 
 
 if __name__ == "__main__":
