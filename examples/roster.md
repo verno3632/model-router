@@ -26,6 +26,7 @@ A worked example: the skill author's subscriptions as of 2026-09. Copy it with `
 - The entry point for delegation is an independent CLI session under Orca. Devin / SWE-2 is started there too. Codex's built-in subagents and direct headless launches are not entry points.
 - The `subagent` launcher is allowed for the "Repository exploration" row only.
 - If Orca itself is unavailable, use the `agent-relay` / `swe-relay` skills and report that you fell back.
+- Every delegated CLI starts without approval prompts, headless or TUI, under Orca or not (2026-09-28, user's decision). A child waiting on an approval stalls the whole run, and the manager cannot answer it for the child. Devin: `--permission-mode dangerous`. Codex: `--dangerously-bypass-approvals-and-sandbox`. Claude Code: `--dangerously-skip-permissions`. A CLI with no such flag: say so in the report instead of starting it with prompts.
 - Important reviews state model and effort explicitly, e.g. `codex -c 'model="gpt-5.6-sol"' -c 'model_reasoning_effort="high"' review`.
 
 ## Roles

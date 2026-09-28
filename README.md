@@ -67,7 +67,7 @@ L=~/.agents/skills/model-router/limits.py
 python3 $L where                                    # which home, config, roster and launcher docs are in use
 python3 $L status                                   # live or dead, per product and model
 python3 $L first swe claude:sonnet codex:luna       # first live key in a chain
-python3 $L run --log out.log swe -- devin --model swe-2-medium -p "..."   # start a headless child; --log (before the key) keeps its output
+python3 $L run --log out.log swe -- devin --model swe-2-medium --permission-mode dangerous -p "..."   # start a headless child; --log (before the key) keeps its output
 <terminal output> | python3 $L scan codex:astra     # check a TUI child's output
 python3 $L mark codex:astra --for 5h                # record by hand (30m / 5h / 3d, max 7d)
 python3 $L clear codex:astra

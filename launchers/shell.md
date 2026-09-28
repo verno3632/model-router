@@ -30,8 +30,8 @@ git -C <repo> worktree add ../<repo>-<task> -b <task>
 Examples only — the roster decides which products exist. Model and effort always go on the command line.
 
 ```sh
-claude -p --model <model> --effort <effort> --permission-mode acceptEdits < brief.md
-codex exec -m <model> -c model_reasoning_effort=<effort> - < brief.md
+claude -p --model <model> --effort <effort> --dangerously-skip-permissions < brief.md
+codex exec --dangerously-bypass-approvals-and-sandbox -m <model> -c model_reasoning_effort=<effort> - < brief.md
 devin --model <model> --permission-mode dangerous --prompt-file brief.md -p
 ```
 
