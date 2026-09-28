@@ -80,8 +80,8 @@ The active mode is the one word in `<home>/mode` (`home` is printed by `limits.p
 |---|---|---|---|
 | `normal` | the Roles table | as the launcher doc | as the Roles table |
 | `astra-max` | Codex × Astra (`codex:astra`), effort `max` | `codex exec -m gpt-6-astra -c model_reasoning_effort=max` | fall back to the Roles table as written, and say so |
-| `astra-ultra-fast` | Codex × Astra (`codex:astra`), effort `ultra`, Fast tier | `codex exec -m gpt-6-astra -c model_reasoning_effort=ultra -c service_tier=fast` (TUI: `codex --model gpt-6-astra -c model_reasoning_effort="ultra" -c service_tier="fast"`) | fall back to the Roles table as written, and say so |
-| `codex-first` | the Codex model that fits each role (table below) | `codex exec -m <model> -c model_reasoning_effort=<effort>` (TUI: `codex --model <model> -c model_reasoning_effort="<effort>"`) | that role's row in the Roles table, and say so |
+| `astra-ultra-fast` | Codex × Astra (`codex:astra`), effort `ultra`, Fast tier | `codex exec -m gpt-6-astra -c model_reasoning_effort=ultra -c service_tier=fast` (TUI: `codex --dangerously-bypass-approvals-and-sandbox --model gpt-6-astra -c model_reasoning_effort="ultra" -c service_tier="fast"`) | fall back to the Roles table as written, and say so |
+| `codex-first` | the Codex model that fits each role (table below) | `codex exec -m <model> -c model_reasoning_effort=<effort>` (TUI: `codex --dangerously-bypass-approvals-and-sandbox --model <model> -c model_reasoning_effort="<effort>"`) | that role's row in the Roles table, and say so |
 
 `ultra` is above `max`: maximum reasoning plus Codex's own automatic delegation to built-in subagents, which this mode allows (the user approved it on 2026-09-26). Fast (`service_tier=fast`) doubles speed and spends more quota. An unsupported tier only prints "not advertised as supported … will be omitted"; if that warning appears, the child is running without Fast — report it.
 
