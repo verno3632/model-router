@@ -16,14 +16,15 @@ Children run as terminals inside Orca worktrees. Read the `orca-cli` skill first
 A bare `orca worktree create` opens one empty shell (`Terminal 1`). Adding `terminal create --command` on top leaves that shell behind as a useless second tab. Start the child **in** the empty shell instead:
 
 ```sh
-orca worktree create --repo id:<repoId> --name <task> --no-parent --json      # note result.worktree.path
+orca worktree create --repo id:<repoId> --name <task> --parent-worktree path:<your worktree> --json   # note result.worktree.path
 orca terminal list --worktree 'id:<repoId>::<path>' --json                    # the one terminal is the empty shell
 orca terminal send --terminal <handle> --text 'exec <command>' --enter
 orca terminal rename --terminal <handle> --title '<task>'
 ```
 
+- `--parent-worktree` makes the new worktree a child of the worktree you run in (`git rev-parse --show-toplevel`), so Orca nests your children under you. Orca guesses the parent from the terminal or cwd only when it can, so pass it every time.
 - `exec` replaces the shell with the child, so the child's exit — including exit code 75 from `limits.py run` — ends the terminal and `wait` sees it.
-- When Orca's built-in launcher is enough (no custom model or effort arguments), `orca worktree create --agent <id> --prompt '<task>'` puts the agent in the first terminal and needs none of this.
+- When Orca's built-in launcher is enough (no custom model or effort arguments), `orca worktree create --agent <id> --prompt '<task>'` (with the same `--parent-worktree`) puts the agent in the first terminal and needs none of this.
 - A repo with `defaultTabs` in its `orca.yaml` gets those tabs instead of the empty shell. They may run real commands; never close or reuse one without checking it is an idle shell.
 
 ## Children
