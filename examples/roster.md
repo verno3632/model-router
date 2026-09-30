@@ -13,6 +13,8 @@ A worked example: the skill author's subscriptions as of 2026-09. Copy it with `
 
 `claude:opus` は **Opus 5.5**（起動 ID `claude-opus-5-5`）を指す。`claude-opus-5` は別の旧モデルなので渡さない（2026-09-23、ユーザー指定）。
 
+`codex:sol` is **GPT-6.1 Sol** (launch ID `gpt-6.1-sol`, released 2026-09-29). Same Codex credit rate as GPT-6 Sol with cached input at half price, and scores above it, so every Sol row launches `gpt-6.1-sol`; do not pass `gpt-6-sol` (2026-09-30, user's decision). GPT-6.1 Astra was never released: `codex:astra` stays `gpt-6-astra`.
+
 `claude:sonnet` is **Sonnet 5.5** (launch ID `claude-sonnet-5-5`). Launch it with `--model claude-sonnet-5-5` and an explicit `--effort`: Claude Code's default is medium, which silently lowers a High row. Cap its effort at xHigh: at max it burns far more tokens and scores below xHigh (2026-09-29, user's decision).
 
 `claude:haiku` is Haiku 4.5, retiring no sooner than 2026-10-15. Once Anthropic announces its retirement date, move its rows to Sonnet 5.5 Low.
@@ -31,7 +33,7 @@ A worked example: the skill author's subscriptions as of 2026-09. Copy it with `
 - The `subagent` launcher is allowed for the "Repository exploration" row only.
 - If Orca itself is unavailable, use the `agent-relay` / `swe-relay` skills and report that you fell back.
 - Every delegated CLI starts without approval prompts, headless or TUI, under Orca or not (2026-09-28, user's decision). A child waiting on an approval stalls the whole run, and the manager cannot answer it for the child. Devin: `--permission-mode dangerous`. Codex: `--dangerously-bypass-approvals-and-sandbox`. Claude Code: `--dangerously-skip-permissions`. A CLI with no such flag: say so in the report instead of starting it with prompts.
-- Important reviews state model and effort explicitly, e.g. `codex -c 'model="gpt-5.6-sol"' -c 'model_reasoning_effort="high"' review`.
+- Important reviews state model and effort explicitly, e.g. `codex -c 'model="gpt-6.1-sol"' -c 'model_reasoning_effort="high"' review`.
 
 ## Roles
 
@@ -100,9 +102,9 @@ In `codex-first`, every role goes to Codex, each to the model that fits it. Code
 | Role (Roles table) | Model | Effort |
 |---|---|---|
 | Direction and supervision, milestone managers | `gpt-5.6-terra` | high |
-| Requirements, design, plan / stuck debugging / hard implementation | `gpt-6-sol` | high (stuck after two failures: max) |
+| Requirements, design, plan / stuck debugging / hard implementation | `gpt-6.1-sol` | high (stuck after two failures: max) |
 | Plan review / UI look / first UI or E2E spec / flaky E2E triage | `gpt-6-astra` | high |
-| Implementation review | `gpt-6-sol`; if Sol wrote the work, `gpt-6-astra` | high |
+| Implementation review | `gpt-6.1-sol`; if Sol wrote the work, `gpt-6-astra` | high |
 | Ordinary implementation / overnight tickets / follow-up E2E specs | `gpt-6-luna` | xhigh |
 | Fact-checking / external research / mechanical mass production / CSS production | `gpt-6-luna` | medium |
 | Repository exploration | `gpt-6-luna` | low |
