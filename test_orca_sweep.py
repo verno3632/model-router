@@ -14,9 +14,16 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lau
 import orca_sweep
 
 
+# Identity for every commit, including ones in fresh submodule clones that
+# never get init_repo's config (CI runners have no global identity).
+GIT_ENV = {**os.environ,
+           "GIT_AUTHOR_NAME": "Sweep Test", "GIT_AUTHOR_EMAIL": "sweep@example.com",
+           "GIT_COMMITTER_NAME": "Sweep Test", "GIT_COMMITTER_EMAIL": "sweep@example.com"}
+
+
 def git(path, *args):
     r = subprocess.run(["git", "-C", path, *args],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, env=GIT_ENV)
     if r.returncode != 0:
         raise AssertionError(f"git {' '.join(args)} failed: {r.stderr}")
     return r.stdout
