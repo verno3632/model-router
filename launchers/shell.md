@@ -2,6 +2,8 @@
 
 No extra tools: the child is a background process with a log file. Headless children only — a TUI needs a terminal, so use `tmux` or `orca` for those. `$L` is `limits.py`, as in `SKILL.md`.
 
+The manager owns the brief, output log, execution handle, exit status and final report. Confirm actual work in the log after start, and inspect the result and diff before reporting completion. A background process is not complete merely because it was started. If user input becomes necessary, preserve the work and return the question to the manager; resume after the answer instead of opening a tab automatically. Keep model selection, limit checks and review independence unchanged.
+
 If your host has its own background-command facility (Claude Code: `Bash` with `run_in_background`; others: their equivalent), use it for **start** / **read** / **wait** and keep only the wrapped command from this page. Otherwise:
 
 ```sh
@@ -23,7 +25,7 @@ A child that edits files gets its own checkout, so parallel children and your ow
 git -C <repo> worktree add ../<repo>-<task> -b <task>
 ```
 
-`<task>` is any short slug. Briefs, logs and `.exit` files go outside the repo (a temp directory), so they never show up in a diff. You, the director, read the diff. Merge and `git worktree remove` only when the user asked for the change to land; otherwise leave the branch and report its name.
+`<task>` is any short slug. Briefs, logs and `.exit` files go outside the repo (a temp directory), so they never show up in a diff. You, the director, read the diff. Follow the project's existing authorization for review, merge and cleanup; otherwise leave the branch and report its name. Reuse an existing task checkout after verifying that its previous writer has stopped. Use the host background runner when available so the child survives ordinary tool-call returns; retain its job handle and log until exit is verified.
 
 ## Headless commands
 

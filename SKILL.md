@@ -64,7 +64,7 @@ Every launcher doc implements the same four verbs:
 | `shell` | yes | no | yes | `run` |
 | `subagent` | — | — | no, host product only | none; `mark` by hand |
 
-Use the first launcher `where` lists that can carry the child. The roster's **Launchers** section overrides this: it may restrict a launcher to certain roles or forbid it, and the launcher docs never widen what the roster allows. Children that edit files get their own git worktree so parallel children cannot collide.
+First apply the roster's **Launchers** section to decide background versus interactive execution; then use the first listed launcher that fits that choice. For manager-owned input/output without user interaction, the shell launcher can take precedence over an earlier Orca launcher. The roster's **Launchers** section overrides the list: it may restrict a launcher to certain roles or forbid it, and the launcher docs never widen what the roster allows. Children that edit files get their own git worktree so parallel children cannot collide.
 
 - A **headless** child (runs a prompt and exits) is always wrapped: `python3 $L run [--log <file>] <key> -- <command>`. Its final output is its report; `--log` keeps a copy where the launcher would lose it.
 - A **TUI** child holds the terminal, so it cannot be wrapped. Pick its tier with `first` before starting it; when it looks stuck, pipe **read** into `python3 $L scan <key>`.

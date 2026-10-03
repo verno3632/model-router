@@ -1,6 +1,6 @@
 # Launcher: Orca
 
-Children run as terminals inside Orca worktrees. Read the `orca-cli` skill first (`orca skills get orca-cli`); read `orchestration` too when you will supervise several workers. `$L` is `limits.py`, as in `SKILL.md`.
+Use this launcher for user-facing interactive sessions and Orca-supervised workers. For manager-owned input/output with no user interaction, apply the roster's **Launchers** section first: use tabless background execution, not a hidden or unfocused terminal tab. Native Orca workers may have no terminal; use `worker-read` and the version-matched orchestration lifecycle for them. The terminal recipes below apply only when a terminal is needed. Read the `orca-cli` skill first (`orca skills get orca-cli`); read `orchestration` too when you will supervise several workers. `$L` is `limits.py`, as in `SKILL.md`.
 
 | Verb | Command |
 |---|---|
